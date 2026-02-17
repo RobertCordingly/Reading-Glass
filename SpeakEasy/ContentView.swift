@@ -1,7 +1,6 @@
 import PDFKit
 import AppKit
 import SwiftUI
-import Vision
 import FoundationModels
 
 /// Wraps PDFKit's PDFThumbnailView, linked to a PDFView instance.
@@ -362,16 +361,21 @@ struct PDFKitView: NSViewRepresentable {
 
             let pageIndex = document.index(for: page)
             let totalPages = document.pageCount
+            let isDark = NSApp.effectiveAppearance.name == .darkAqua
+            let colorScheme: ColorScheme = isDark ? .dark : .light
+
+            let pagePillView = Text("Page \(pageIndex + 1) of \(totalPages)")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.primary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .glassEffect(.regular, in: .capsule)
+                .environment(\.colorScheme, colorScheme)
 
             // Create or update the overlay
             if pageNumberOverlay == nil {
-                let pillView = NSHostingView(rootView: AnyView(
-                    Text("Page \(pageIndex + 1) of \(totalPages)")
-                        .font(.system(size: 12, weight: .medium))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .glassEffect(.regular, in: .capsule)
-                ))
+                let pillView = NSHostingView(rootView: AnyView(pagePillView))
+                pillView.appearance = NSApp.effectiveAppearance
                 pillView.translatesAutoresizingMaskIntoConstraints = false
                 pdfView.addSubview(pillView)
                 NSLayoutConstraint.activate([
@@ -382,16 +386,11 @@ struct PDFKitView: NSViewRepresentable {
                 currentVisiblePage = pageIndex
             } else if pageIndex != currentVisiblePage {
                 currentVisiblePage = pageIndex
-                pageNumberOverlay?.rootView = AnyView(
-                    Text("Page \(pageIndex + 1) of \(totalPages)")
-                        .font(.system(size: 12, weight: .medium))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .glassEffect(.regular, in: .capsule)
-                )
+                pageNumberOverlay?.rootView = AnyView(pagePillView)
             }
 
             pageNumberOverlay?.isHidden = false
+            pageNumberOverlay?.appearance = NSApp.effectiveAppearance
 
             // Keep it on top of other subviews
             if let overlay = pageNumberOverlay {
@@ -485,6 +484,9 @@ struct ContentView: View {
     @StateObject private var speechManager = SpeechManager()
     @State private var rawText = ""
     @State private var cleanedText = ""
+    @State private var displayText = ""
+    @State private var aiCleanedSectionTexts: [Int: String] = [:]
+    @State private var displaySectionOffsets: [Int] = []
     @State private var pdfDocument: PDFDocument?
     @State private var pdfHighlightText = ""
     @State private var pdfHighlightPage: Int?
@@ -509,9 +511,6 @@ struct ContentView: View {
     @State private var speakMathSymbols = true
     @State private var removeFiguresAndTables = true
     @State private var showEditor = false
-    @State private var isImporting = false
-    @State private var importProgress: Double = 0
-    @State private var importPageStatus = ""
     @State private var isCleaningInBackground = false
     @State private var backgroundCleanProgress: Double = 0
     @State private var backgroundCleanStatus = ""
@@ -826,29 +825,13 @@ struct ContentView: View {
     /// Get the text of the current section based on cursor position
     private func currentSectionText() -> String {
         let cursor = speechManager.cursorUTF16
-        let nsText = cleanedText as NSString
-        guard nsText.length > 0 else { return cleanedText }
+        let nsText = displayText as NSString
+        guard nsText.length > 0 else { return displayText }
+        guard !displaySectionOffsets.isEmpty else { return displayText }
 
-        guard !parsedSections.isEmpty else { return cleanedText }
-
-        // Find current section
-        var currentIdx = 0
-        for (i, section) in parsedSections.enumerated() {
-            if section.utf16Offset <= cursor {
-                currentIdx = i
-            } else {
-                break
-            }
-        }
-
-        let start = parsedSections[currentIdx].utf16Offset
-        let end: Int
-        if currentIdx + 1 < parsedSections.count {
-            end = parsedSections[currentIdx + 1].utf16Offset
-        } else {
-            end = nsText.length
-        }
-
+        let idx = (0..<parsedSections.count).last(where: { displaySectionOffsets[$0] <= cursor }) ?? 0
+        let start = displaySectionOffsets[idx]
+        let end = displaySectionOffsets[idx + 1]
         let range = NSRange(location: start, length: end - start)
         return nsText.substring(with: range)
     }
@@ -930,9 +913,12 @@ struct ContentView: View {
             speechManager.stop()
         }
         cleanedText = applyPronunciations(TextProcessor.process(rawText, options: textProcessorOptions))
+        aiCleanedSectionTexts = [:]
         parseSections()
+        buildDisplayText()
+        startSectionBasedAICleanup()
         if wasPlaying {
-            speechManager.play(text: cleanedText)
+            speechManager.play(text: displayText)
         }
     }
 
@@ -1180,12 +1166,16 @@ struct ContentView: View {
     /// Jump to a section in the reader view
     /// Move cursor to Abstract if found in the text
     private func jumpToAbstract() {
-        let nsText = cleanedText as NSString
+        let nsText = displayText as NSString
         guard nsText.length > 0 else { return }
 
-        // Use the same detection logic as findAbstractRange
+        if let idx = parsedSections.firstIndex(where: { $0.title.lowercased().hasPrefix("abstract") }) {
+            speechManager.cursorUTF16 = displaySectionOffsets.indices.contains(idx) ? displaySectionOffsets[idx] : 0
+            return
+        }
+
         if let regex = try? NSRegularExpression(pattern: #"(?i)(?:^|\n\n?)abstract(?:\s*[—–\-:\.]\s*|\s*\n)"#, options: []) {
-            if let match = regex.firstMatch(in: cleanedText, options: [], range: NSRange(location: 0, length: nsText.length)) {
+            if let match = regex.firstMatch(in: displayText, options: [], range: NSRange(location: 0, length: nsText.length)) {
                 let matchStr = nsText.substring(with: match.range)
                 let abstractLocalRange = (matchStr as NSString).range(of: "abstract", options: .caseInsensitive)
                 if abstractLocalRange.location != NSNotFound {
@@ -1195,9 +1185,7 @@ struct ContentView: View {
             }
         }
 
-        // Fallback: check if text starts with Abstract
-        let lower = cleanedText.lowercased()
-        if lower.hasPrefix("abstract") {
+        if displayText.lowercased().hasPrefix("abstract") {
             speechManager.cursorUTF16 = 0
         }
     }
@@ -1209,7 +1197,12 @@ struct ContentView: View {
         }
 
         speechManager.stop()
-        speechManager.cursorUTF16 = section.utf16Offset
+        if let idx = parsedSections.firstIndex(where: { $0.id == section.id }),
+           displaySectionOffsets.indices.contains(idx) {
+            speechManager.cursorUTF16 = displaySectionOffsets[idx]
+        } else {
+            speechManager.cursorUTF16 = section.utf16Offset
+        }
         speechManager.cursorLengthUTF16 = (section.title as NSString).length
 
         sidebarMode = .reader
@@ -1217,7 +1210,7 @@ struct ContentView: View {
 
     /// Estimated remaining listening time based on cursor position and speed
     private var estimatedTimeRemaining: String {
-        let totalUTF16 = cleanedText.utf16.count
+        let totalUTF16 = displayText.utf16.count
         guard totalUTF16 > 0 else { return "--:--" }
 
         let remainingUTF16 = max(totalUTF16 - speechManager.cursorUTF16, 0)
@@ -1245,7 +1238,7 @@ struct ContentView: View {
 
     /// Playback progress as a percentage
     private var playbackProgress: Double {
-        let totalUTF16 = cleanedText.utf16.count
+        let totalUTF16 = displayText.utf16.count
         guard totalUTF16 > 0 else { return 0 }
         return min(Double(speechManager.cursorUTF16) / Double(totalUTF16), 1.0)
     }
@@ -1280,17 +1273,10 @@ struct ContentView: View {
 
     /// The name of the section the cursor is currently in
     private var currentSectionName: String {
-        guard !parsedSections.isEmpty else { return "" }
+        guard !parsedSections.isEmpty, !displaySectionOffsets.isEmpty else { return "" }
         let cursor = speechManager.cursorUTF16
-        var current: SectionItem?
-        for section in parsedSections {
-            if section.utf16Offset <= cursor {
-                current = section
-            } else {
-                break
-            }
-        }
-        return current?.title ?? ""
+        let idx = (0..<parsedSections.count).last(where: { displaySectionOffsets[$0] <= cursor }) ?? 0
+        return parsedSections[idx].title
     }
 
     /// Floating liquid glass playback pill overlay — Apple Music style layout
@@ -1299,7 +1285,7 @@ struct ContentView: View {
             // Left: transport controls
             HStack(spacing: 20) {
                 Button(action: {
-                    speechManager.skipBackward(in: cleanedText)
+                    speechManager.skipBackward(in: displayText)
                 }) {
                     Image(systemName: "backward.fill")
                         .font(.system(size: 20))
@@ -1318,7 +1304,7 @@ struct ContentView: View {
                     .help("Pause")
                 } else {
                     Button(action: {
-                        speechManager.play(text: cleanedText)
+                        speechManager.play(text: displayText)
                     }) {
                         Image(systemName: "play.fill")
                             .font(.system(size: 26))
@@ -1328,7 +1314,7 @@ struct ContentView: View {
                 }
 
                 Button(action: {
-                    speechManager.skipForward(in: cleanedText)
+                    speechManager.skipForward(in: displayText)
                 }) {
                     Image(systemName: "forward.fill")
                         .font(.system(size: 20))
@@ -1341,7 +1327,7 @@ struct ContentView: View {
                 .frame(height: 24)
 
             // Center: section name + progress bar
-            if !cleanedText.isEmpty {
+            if !displayText.isEmpty {
                 VStack(spacing: 5) {
                     if !currentSectionName.isEmpty {
                         Button(action: {
@@ -1399,26 +1385,26 @@ struct ContentView: View {
                             .contentShape(Rectangle())
                             .onTapGesture { location in
                                 let fraction = max(0, min(location.x / geo.size.width, 1.0))
-                                let totalUTF16 = cleanedText.utf16.count
+                                let totalUTF16 = displayText.utf16.count
                                 let targetUTF16 = Int(fraction * Double(totalUTF16))
 
                                 // Snap to nearest word boundary
-                                let idx = String.Index(utf16Offset: min(targetUTF16, totalUTF16), in: cleanedText)
+                                let idx = String.Index(utf16Offset: min(targetUTF16, totalUTF16), in: displayText)
                                 var wordStart = idx
-                                while wordStart > cleanedText.startIndex && !cleanedText[cleanedText.index(before: wordStart)].isWhitespace {
-                                    wordStart = cleanedText.index(before: wordStart)
+                                while wordStart > displayText.startIndex && !displayText[displayText.index(before: wordStart)].isWhitespace {
+                                    wordStart = displayText.index(before: wordStart)
                                 }
 
                                 if let coordinator = pdfViewInstance?.pageOverlayViewProvider as? PDFKitView.Coordinator {
                                     coordinator.bypassStabilization = true
                                 }
 
-                                speechManager.cursorUTF16 = wordStart.utf16Offset(in: cleanedText)
+                                speechManager.cursorUTF16 = wordStart.utf16Offset(in: displayText)
                                 speechManager.cursorLengthUTF16 = 0
 
                                 if speechManager.isPlaying {
                                     speechManager.stop()
-                                    speechManager.play(text: cleanedText)
+                                    speechManager.play(text: displayText)
                                 }
                             }
                         }
@@ -1476,7 +1462,7 @@ struct ContentView: View {
                             Slider(value: $speedMultiplier, in: 0.5...4.0, step: 0.1)
                                 .frame(width: 160)
                                 .onChange(of: speedMultiplier) { _, newValue in
-                                    speechManager.setRate(Float(newValue), restartWith: cleanedText)
+                                    speechManager.setRate(Float(newValue), restartWith: displayText)
                                 }
                             Image(systemName: "airplane")
                                 .font(.system(size: 11))
@@ -1489,7 +1475,7 @@ struct ContentView: View {
                             ForEach(speedPresets, id: \.speed) { preset in
                                 Button(action: {
                                     speedMultiplier = preset.speed
-                                    speechManager.setRate(Float(preset.speed), restartWith: cleanedText)
+                                    speechManager.setRate(Float(preset.speed), restartWith: displayText)
                                 }) {
                                     VStack(spacing: 3) {
                                         Image(systemName: preset.icon)
@@ -1516,7 +1502,7 @@ struct ContentView: View {
                 Menu {
                     ForEach(speechManager.availableVoices, id: \.identifier) { voice in
                         Button(action: {
-                            speechManager.setVoice(voice.identifier, restartWith: cleanedText)
+                            speechManager.setVoice(voice.identifier, restartWith: displayText)
                         }) {
                             if speechManager.selectedVoiceID == voice.identifier {
                                 Label(voice.name, systemImage: "checkmark")
@@ -1599,24 +1585,6 @@ struct ContentView: View {
                 .background(Color(nsColor: .controlBackgroundColor))
             }
 
-            // Import progress overlay
-            if isImporting {
-                ZStack {
-                    Color.black.opacity(0.3)
-                        .ignoresSafeArea()
-
-                    VStack(spacing: 12) {
-                        ProgressView(value: importProgress)
-                            .progressViewStyle(.linear)
-                            .frame(width: 200)
-                        Text(importPageStatus)
-                            .font(.system(size: 13))
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(24)
-                    .glassEffect(.regular, in: .rect(cornerRadius: 12))
-                }
-            }
         }
     }
 
@@ -1627,7 +1595,7 @@ struct ContentView: View {
                 switch sidebarMode {
                 case .reader:
                     ReaderTextView(
-                        text: (cleanedText.isEmpty ? "" : cleanedText) + "\n\n\n\n\n",
+                        text: (displayText.isEmpty ? "" : displayText) + "\n\n\n\n\n",
                         cursorUTF16: speechManager.cursorUTF16,
                         cursorLengthUTF16: speechManager.cursorLengthUTF16,
                         onWordClicked: { utf16Offset in
@@ -1718,7 +1686,7 @@ struct ContentView: View {
                     Label("Summarize", systemImage: "apple.intelligence")
                 }
                 .help("Summarize current section with Apple Intelligence")
-                .disabled(cleanedText.isEmpty)
+                .disabled(displayText.isEmpty)
 
                 if isCleaningInBackground {
                     HStack(spacing: 6) {
@@ -1784,9 +1752,12 @@ struct ContentView: View {
                 let wasPlaying = speechManager.isPlaying
                 if wasPlaying { speechManager.stop() }
                 cleanedText = applyPronunciations(TextProcessor.process(newValue, options: textProcessorOptions))
+                aiCleanedSectionTexts = [:]
                 speechManager.resetCursor()
                 parseSections()
+                buildDisplayText()
                 jumpToAbstract()
+                startSectionBasedAICleanup()
             }
             .onChange(of: speechManager.cursorUTF16) { _, _ in
                 updatePDFHighlight()
@@ -1836,14 +1807,14 @@ struct ContentView: View {
     private func performSearch() {
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return }
-        guard !cleanedText.isEmpty else { return }
+        guard !displayText.isEmpty else { return }
 
         // Bypass stabilization so the PDF highlight jumps immediately
         if let coordinator = pdfViewInstance?.pageOverlayViewProvider as? PDFKitView.Coordinator {
             coordinator.bypassStabilization = true
         }
 
-        let nsText = cleanedText as NSString
+        let nsText = displayText as NSString
         let textLength = nsText.length
         guard textLength > 0 else { return }
 
@@ -1896,10 +1867,10 @@ struct ContentView: View {
     /// Parses PAGE markers in the cleaned text to find section boundaries.
     /// Returns [(pageNumber, sectionStartUTF16, sectionEndUTF16)].
     private func pageRangesInCleanedText() -> [(page: Int, start: Int, end: Int)] {
-        let nsText = cleanedText as NSString
+        let nsText = displayText as NSString
         let pattern = "PAGE (\\d+)"
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
-        let matches = regex.matches(in: cleanedText, range: NSRange(location: 0, length: nsText.length))
+        let matches = regex.matches(in: displayText, range: NSRange(location: 0, length: nsText.length))
 
         var ranges: [(page: Int, start: Int, end: Int)] = []
         for (i, match) in matches.enumerated() {
@@ -1921,9 +1892,9 @@ struct ContentView: View {
     // MARK: - Reader → PDF Highlighting
 
     private func updatePDFHighlight() {
-        guard pdfDocument != nil, !cleanedText.isEmpty else { return }
+        guard pdfDocument != nil, !displayText.isEmpty else { return }
 
-        let nsText = cleanedText as NSString
+        let nsText = displayText as NSString
         let cursor = min(speechManager.cursorUTF16, nsText.length)
 
         // Determine which page the cursor is on from PAGE markers
@@ -1970,7 +1941,7 @@ struct ContentView: View {
     /// Jumps the reader cursor to the word selected in the PDF.
     /// Uses page number and occurrence counting for precise matching.
     private func jumpToWord(_ word: String, fromPage pageIndex: Int, occurrence: Int) {
-        guard !cleanedText.isEmpty, !word.isEmpty else { return }
+        guard !displayText.isEmpty, !word.isEmpty else { return }
 
         // Bypass stabilization so the PDF highlight jumps immediately
         if let coordinator = pdfViewInstance?.pageOverlayViewProvider as? PDFKitView.Coordinator {
@@ -1980,7 +1951,7 @@ struct ContentView: View {
         let cleanedWord = TextProcessor.process(word, options: textProcessorOptions)
         guard !cleanedWord.isEmpty else { return }
 
-        let nsText = cleanedText as NSString
+        let nsText = displayText as NSString
         let pages = pageRangesInCleanedText()
 
         // Try to find the nth occurrence within the matching page section
@@ -2037,149 +2008,160 @@ struct ContentView: View {
         guard let document = PDFDocument(url: url) else { return }
 
         pdfDocument = document
-
         cleanupGeneration += 1
 
-        // Extract text from all pages with PDFKit first (instant)
         var pageTexts: [Int: String] = [:]
-        var flaggedPages: [Int] = []
-        let qualityThreshold = 0.05
-
         for i in 0..<document.pageCount {
-            let pageText = document.page(at: i)?.string ?? ""
-            pageTexts[i] = pageText
+            pageTexts[i] = document.page(at: i)?.string ?? ""
+        }
+        rawText = assembleExtractedText(document: document, pageTexts: pageTexts)
+    }
 
-            // Score quality and flag bad pages for OCR
-            let score = TextProcessor.textQualityScore(pageText)
-            if score > qualityThreshold && !pageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                flaggedPages.append(i)
-            }
+    /// Builds displayText from cleanedText, applying AI-cleaned section overrides.
+    /// Also updates displaySectionOffsets for mapping between displayText and sections.
+    private func buildDisplayText() {
+        let text = cleanedText
+        let nsText = text as NSString
+        guard nsText.length > 0 else {
+            displayText = ""
+            displaySectionOffsets = []
+            return
         }
 
-        if flaggedPages.isEmpty {
-            // All pages are clean — assemble and display immediately
-            rawText = assembleExtractedText(document: document, pageTexts: pageTexts)
-            startBackgroundAICleanup() 
-        } else {
-            // Some pages need OCR — run async with progress
-            isImporting = true
-            importProgress = 0
-            importPageStatus = "Preparing OCR..."
+        if parsedSections.isEmpty || aiCleanedSectionTexts.isEmpty {
+            displayText = text
+            displaySectionOffsets = parsedSections.isEmpty ? [0, nsText.length] : parsedSections.map { $0.utf16Offset } + [nsText.length]
+            return
+        }
 
-            Task {
-                var updatedTexts = pageTexts
+        var result = ""
+        var offsets: [Int] = [0]
+        let figureTablePattern = #"(?i)(?:Figure\s+\d|Fig\.\s*\d|Table\s+\d|TABLE)"#
 
-                for (idx, pageIndex) in flaggedPages.enumerated() {
-                    await MainActor.run {
-                        importProgress = Double(idx) / Double(flaggedPages.count)
-                        importPageStatus = "OCR page \(pageIndex + 1) of \(document.pageCount)..."
-                    }
+        for i in 0..<parsedSections.count {
+            let start = parsedSections[i].utf16Offset
+            let end = i + 1 < parsedSections.count ? parsedSections[i + 1].utf16Offset : nsText.length
+            let sectionRange = NSRange(location: start, length: end - start)
+            let originalContent = nsText.substring(with: sectionRange)
 
-                    if let page = document.page(at: pageIndex),
-                       let ocrText = await ocrPage(page) {
-                        updatedTexts[pageIndex] = ocrText
-                    }
-                }
-
-                let finalText = assembleExtractedText(document: document, pageTexts: updatedTexts)
-
-                await MainActor.run {
-                    importProgress = 1.0
-                    importPageStatus = ""
-                    isImporting = false
-                    rawText = finalText
-                    startBackgroundAICleanup() 
-                }
+            let content: String
+            if let cleaned = aiCleanedSectionTexts[i] {
+                content = cleaned
+            } else {
+                content = originalContent
             }
+            result += content
+            offsets.append((result as NSString).length)
+        }
+
+        displayText = result
+        displaySectionOffsets = offsets
+
+        // Clamp cursor to valid range
+        let newLen = (result as NSString).length
+        if speechManager.cursorUTF16 >= newLen {
+            speechManager.cursorUTF16 = max(0, newLen - 1)
         }
     }
 
-    /// Kicks off background AI cleanup of pages containing figure/table indicators.
-    /// Updates rawText in-place when done, which triggers reprocessing through TextProcessor.
-    private func startBackgroundAICleanup() {
+    /// Kicks off background AI cleanup of sections (from cleanedText) containing figure/table indicators.
+    /// Updates displayText incrementally as each section is cleaned.
+    private func startSectionBasedAICleanup() {
         guard removeFiguresAndTables else { return }
 
         let model = SystemLanguageModel.default
         guard case .available = model.availability else { return }
 
         let currentGeneration = cleanupGeneration
+        let text = displayText
+        let sections = parsedSections
+        let nsText = text as NSString
 
-        // Parse rawText into per-page texts by splitting on PAGE markers
-        let pagePattern = #"--SE_NEWLINE--PAGE (\d+)--SE_NEWLINE--\n"#
-        let parts = rawText.components(separatedBy: try! NSRegularExpression(pattern: pagePattern).matches(
-            in: rawText, range: NSRange(rawText.startIndex..., in: rawText)
-        ).isEmpty ? "~~NOSPLIT~~" : "")
+        guard nsText.length > 0 else { return }
 
-        // Build page dictionary from rawText
-        var pageTexts: [(Int, String)] = []
-        let regex = try! NSRegularExpression(pattern: #"--SE_NEWLINE--PAGE (\d+)--SE_NEWLINE--\n"#)
-        let matches = regex.matches(in: rawText, range: NSRange(rawText.startIndex..., in: rawText))
-
-        for (i, match) in matches.enumerated() {
-            guard let numRange = Range(match.range(at: 1), in: rawText) else { continue }
-            let pageNum = Int(rawText[numRange]) ?? 0
-
-            let contentStart = rawText.index(rawText.startIndex, offsetBy: match.range.upperBound)
-            let contentEnd: String.Index
-            if i + 1 < matches.count {
-                contentEnd = rawText.index(rawText.startIndex, offsetBy: matches[i + 1].range.lowerBound)
-            } else {
-                contentEnd = rawText.endIndex
-            }
-            let pageText = String(rawText[contentStart..<contentEnd])
-            pageTexts.append((pageNum, pageText))
-        }
-
-        // Find pages with figure/table indicators
         let figureTablePattern = #"(?i)(?:Figure\s+\d|Fig\.\s*\d|Table\s+\d|TABLE)"#
-        let flaggedIndices = pageTexts.enumerated().compactMap { (idx, entry) -> Int? in
-            entry.1.range(of: figureTablePattern, options: .regularExpression) != nil ? idx : nil
+
+        // Get section indices that need cleaning (have figure/table indicators)
+        var sectionIndicesToClean: [Int] = []
+        for i in 0..<sections.count {
+            let start = sections[i].utf16Offset
+            let end = i + 1 < sections.count ? sections[i + 1].utf16Offset : nsText.length
+            let range = NSRange(location: start, length: end - start)
+            let sectionText = nsText.substring(with: range)
+            if sectionText.range(of: figureTablePattern, options: .regularExpression) != nil {
+                sectionIndicesToClean.append(i)
+            }
         }
 
-        guard !flaggedIndices.isEmpty else { return }
+        guard !sectionIndicesToClean.isEmpty else { return }
 
         isCleaningInBackground = true
         backgroundCleanProgress = 0
-        backgroundCleanStatus = "Cleaning 1/\(flaggedIndices.count)..."
+        backgroundCleanStatus = "Cleaning 1/\(sectionIndicesToClean.count)..."
 
         Task {
-            var updatedPages = pageTexts
-
-            for (step, flaggedIdx) in flaggedIndices.enumerated() {
-                // Check for cancellation (re-import happened)
+            for (step, sectionIdx) in sectionIndicesToClean.enumerated() {
                 if cleanupGeneration != currentGeneration {
                     await MainActor.run { isCleaningInBackground = false }
                     return
                 }
 
                 await MainActor.run {
-                    backgroundCleanProgress = Double(step) / Double(flaggedIndices.count)
-                    backgroundCleanStatus = "Cleaning \(step + 1)/\(flaggedIndices.count)..."
+                    backgroundCleanProgress = Double(step) / Double(sectionIndicesToClean.count)
+                    backgroundCleanStatus = "Cleaning \(step + 1)/\(sectionIndicesToClean.count)..."
                 }
 
-                let cleaned = await aiCleanPage(updatedPages[flaggedIdx].1)
-                updatedPages[flaggedIdx] = (updatedPages[flaggedIdx].0, cleaned)
-            }
+                let start = sections[sectionIdx].utf16Offset
+                let end = sectionIdx + 1 < sections.count ? sections[sectionIdx + 1].utf16Offset : nsText.length
+                let range = NSRange(location: start, length: end - start)
+                var sectionText = nsText.substring(with: range)
 
-            // Check once more before applying
-            guard cleanupGeneration == currentGeneration else {
-                await MainActor.run { isCleaningInBackground = false }
-                return
-            }
+                // Preserve section header (first line) - AI may strip it
+                let lines = sectionText.components(separatedBy: "\n")
+                let header = lines.first ?? ""
+                let body = lines.dropFirst().joined(separator: "\n")
+                let cleanedBody = await aiCleanSection(body)
+                let cleanedSection = header.isEmpty ? cleanedBody : header + "\n" + cleanedBody
 
-            // Reassemble text with PAGE markers
-            var result = ""
-            for (pageNum, text) in updatedPages {
-                result += "--SE_NEWLINE--PAGE \(pageNum)--SE_NEWLINE--\n"
-                result += text
+                await MainActor.run {
+                    if cleanupGeneration != currentGeneration { return }
+                    aiCleanedSectionTexts[sectionIdx] = cleanedSection
+                    buildDisplayText()
+                }
             }
 
             await MainActor.run {
                 backgroundCleanProgress = 1.0
                 backgroundCleanStatus = ""
                 isCleaningInBackground = false
-                rawText = result
             }
+        }
+    }
+
+    /// Uses Apple Intelligence to strip figure captions, table data, and other non-prose content.
+    private func aiCleanSection(_ text: String) async -> String {
+        let model = SystemLanguageModel.default
+        guard case .available = model.availability else { return text }
+        guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { return text }
+
+        do {
+            let instructions = """
+                You are a text extraction assistant. You receive text from a section of an academic paper. \
+                Your job is to return ONLY the body prose text. Remove: \
+                figure captions (e.g. "Figure 1: ...", "Fig. 2. ..."), \
+                table content (rows of data, column headers), \
+                table captions (e.g. "Table 1: ..."), \
+                chart axis labels and legends, \
+                and page headers and footers. \
+                If there are errors in the text attempt to fix them. \
+                Return the remaining prose exactly as-is. Do not summarize or add anything. \
+                If the section contains only figures/tables with no prose, return an empty string.
+                """
+            let session = LanguageModelSession(instructions: instructions)
+            let response = try await session.respond(to: text)
+            return response.content
+        } catch {
+            return text
         }
     }
 
@@ -2223,62 +2205,6 @@ struct ContentView: View {
         }
     }
 
-    /// Renders a PDF page to a CGImage and runs Vision OCR on it.
-    /// Returns the recognized text joined by newlines, or nil on failure.
-    private func ocrPage(_ page: PDFPage) async -> String? {
-        // Render page to image at 2x scale for good OCR quality
-        let pageRect = page.bounds(for: .mediaBox)
-        let scale: CGFloat = 2.0
-        let width = Int(pageRect.width * scale)
-        let height = Int(pageRect.height * scale)
-
-        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
-              let ctx = CGContext(
-                  data: nil,
-                  width: width,
-                  height: height,
-                  bitsPerComponent: 8,
-                  bytesPerRow: 0,
-                  space: colorSpace,
-                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-              ) else {
-            return nil
-        }
-
-        ctx.setFillColor(NSColor.white.cgColor)
-        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
-        ctx.scaleBy(x: scale, y: scale)
-
-        // PDFPage.draw applies the page's own transform
-        page.draw(with: .mediaBox, to: ctx)
-
-        guard let cgImage = ctx.makeImage() else { return nil }
-
-        // Run Vision OCR
-        return await withCheckedContinuation { continuation in
-            let request = VNRecognizeTextRequest { request, error in
-                guard error == nil,
-                      let observations = request.results as? [VNRecognizedTextObservation] else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-
-                // Sort observations top-to-bottom (Vision uses bottom-left origin, so reverse Y)
-                let sorted = observations.sorted { $0.boundingBox.origin.y > $1.boundingBox.origin.y }
-                let lines = sorted.compactMap { $0.topCandidates(1).first?.string }
-                continuation.resume(returning: lines.joined(separator: "\n"))
-            }
-            request.recognitionLevel = .accurate
-            request.usesLanguageCorrection = true
-
-            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-            do {
-                try handler.perform([request])
-            } catch {
-                continuation.resume(returning: nil)
-            }
-        }
-    }
 }
 
 #Preview {
