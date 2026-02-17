@@ -480,9 +480,10 @@ struct SectionItem: Identifiable {
     let level: Int  // 0 = top-level (roman numeral / numeric), 1 = sub-section (letter / x.y)
 }
 
-/// A log entry for AI cleanup of a section.
+/// A log entry for AI cleanup of a chunk.
 struct CleanupLogEntry: Identifiable {
     let id = UUID()
+    let chunkIndex: Int
     let sectionTitle: String
     let beforeText: String
     let afterText: String
@@ -607,17 +608,26 @@ private struct CleanupLogDiffContent: View {
 
 private struct CleanupLogEntryRow: View {
     let entry: CleanupLogEntry
+    let onRevert: () -> Void
 
     var body: some View {
         DisclosureGroup {
             CleanupLogDiffContent(entry: entry)
         } label: {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(entry.sectionTitle)
-                    .font(.system(size: 12, weight: .medium))
-                Text("\(entry.charsRemoved) chars removed (\(entry.originalLength) → \(entry.cleanedLength))")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(entry.sectionTitle)
+                        .font(.system(size: 12, weight: .medium))
+                    Text("\(entry.charsRemoved) chars removed (\(entry.originalLength) → \(entry.cleanedLength))")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Revert") {
+                    onRevert()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
         }
         .padding(.vertical, 6)
@@ -802,7 +812,11 @@ struct ContentView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(cleanupLog) { entry in
-                            CleanupLogEntryRow(entry: entry)
+                            CleanupLogEntryRow(entry: entry) {
+                                aiCleanedChunks.removeValue(forKey: entry.chunkIndex)
+                                cleanupLog = cleanupLog.filter { $0.id != entry.id }
+                                buildDisplayText()
+                            }
                         }
                     }
                     .padding(12)
@@ -2254,8 +2268,14 @@ struct ContentView: View {
         rawText = assembleExtractedText(document: document, pageTexts: pageTexts)
     }
 
-    /// Splits text into ~500-character chunks, breaking at word boundaries when possible.
-    private func makeChunks(from text: String, chunkSize: Int = 500) -> [(start: Int, end: Int)] {
+    /// True if the only differences between original and modified are whitespace (spaces, newlines, etc).
+    private func isWhitespaceOnlyChange(original: String, modified: String) -> Bool {
+        let norm = { (s: String) in s.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ") }
+        return norm(original) == norm(modified)
+    }
+
+    /// Splits text into ~1000-character chunks, breaking at word boundaries when possible.
+    private func makeChunks(from text: String, chunkSize: Int = 1000) -> [(start: Int, end: Int)] {
         let nsText = text as NSString
         guard nsText.length > 0 else { return [] }
         var chunks: [(Int, Int)] = []
@@ -2350,16 +2370,10 @@ struct ContentView: View {
 
         guard nsText.length > 0 else { return }
 
-        let figureTablePattern = #"(?i)(?:Figure\s+\d|Fig\.\s*\d|Table\s+\d|TABLE)"#
         let chunks = makeChunks(from: text)
-
-        var indicesToClean: [Int] = []
-        for (idx, (start, end)) in chunks.enumerated() {
-            let chunkText = nsText.substring(with: NSRange(location: start, length: end - start))
-            if chunkText.range(of: figureTablePattern, options: .regularExpression) != nil {
-                indicesToClean.append(idx)
-            }
-        }
+        let indicesToClean = chunks.enumerated()
+            .filter { (_, range) in range.end - range.start >= 200 }
+            .map(\.offset)
 
         guard !indicesToClean.isEmpty else { return }
 
@@ -2398,19 +2412,23 @@ struct ContentView: View {
                 let originalLength = chunkText.count
 
                 let cleanedChunk = await aiCleanSection(chunkText)
-                let cleanedLength = cleanedChunk.count
+                let hasMeaningfulChange = !isWhitespaceOnlyChange(original: chunkText, modified: cleanedChunk)
+                let finalChunk = hasMeaningfulChange ? cleanedChunk : chunkText
 
                 await MainActor.run {
                     if cleanupGeneration != currentGeneration { return }
-                    aiCleanedChunks[chunkIdx] = cleanedChunk
-                    cleanupLog.append(CleanupLogEntry(
-                        sectionTitle: sectionTitle,
-                        beforeText: chunkText,
-                        afterText: cleanedChunk,
-                        originalLength: originalLength,
-                        cleanedLength: cleanedLength
-                    ))
-                    buildDisplayText()
+                    if hasMeaningfulChange {
+                        aiCleanedChunks[chunkIdx] = finalChunk
+                        cleanupLog.append(CleanupLogEntry(
+                            chunkIndex: chunkIdx,
+                            sectionTitle: sectionTitle,
+                            beforeText: chunkText,
+                            afterText: finalChunk,
+                            originalLength: originalLength,
+                            cleanedLength: finalChunk.count
+                        ))
+                        buildDisplayText()
+                    }
                 }
             }
 
@@ -2431,16 +2449,17 @@ struct ContentView: View {
         do {
             let instructions = """
                 You are a text extraction assistant for a text to speech application. You receive text from a section of an academic paper. \
-                Your job is to return ONLY the body prose text. Remove: \
-                1. figure captions (e.g. "Figure 1: ...", "Fig. 2. ..."), \
-                2. table content (rows of data, column headers), \
-                3. table captions (e.g. "Table 1: ..."), \
-                4. chart axis labels and legends, \
-                5. page headers and footers, \
-                6. If there are errors or typos in the text fix them, \
+                Your job is to return ONLY the body prose text. Make the changes: \
+                1. If there are errors or typos in the text fix them, \
+                2. Remove figure captions (e.g. "Figure 1: ...", "Fig. 2. ..."), \
+                3. Remove table content (rows of data, column headers), \
+                4. Remove table captions (e.g. "Table 1: ..."), \
+                5. Remove chart axis labels and legends, \
+                6. Remove page headers and footers, \
                 7. If there are garbage characters that are difficult for TTS to read remove them, \
-                8. DO NOT remove page numbers, or modify white space, \
-                9. Return the remaining text exactly as-is. Do not summarize or add any additional text.
+                8. Remove sections that do not need to be read. Such as Concept lists, Keyword lists, or Reference Formats. \
+                9. DO NOT remove page numbers, or modify white space, \
+                10. Return the remaining text exactly as-is. Do not summarize or add any additional text.
                 """
             let session = LanguageModelSession(instructions: instructions)
             let response = try await session.respond(to: text)
