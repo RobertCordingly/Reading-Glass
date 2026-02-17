@@ -1,0 +1,2286 @@
+import PDFKit
+import AppKit
+import SwiftUI
+import Vision
+import FoundationModels
+
+/// Wraps PDFKit's PDFThumbnailView, linked to a PDFView instance.
+struct PDFThumbnailStrip: NSViewRepresentable {
+    let pdfView: PDFView?
+
+    func makeNSView(context: Context) -> PDFThumbnailView {
+        let thumbnailView = PDFThumbnailView()
+        thumbnailView.thumbnailSize = CGSize(width: 120, height: 165)
+        thumbnailView.pdfView = pdfView
+        if let scrollView = thumbnailView.subviews.first(where: { $0 is NSScrollView }) as? NSScrollView {
+            scrollView.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
+        }
+        thumbnailView.enclosingScrollView?.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
+        return thumbnailView
+    }
+
+    func updateNSView(_ thumbnailView: PDFThumbnailView, context: Context) {
+        if thumbnailView.pdfView !== pdfView {
+            thumbnailView.pdfView = pdfView
+        }
+    }
+}
+
+/// A macOS toolbar-friendly NSSearchField wrapper.
+struct ToolbarSearchField: NSViewRepresentable {
+    @Binding var text: String
+    let prompt: String
+    let onSubmit: () -> Void
+
+    func makeNSView(context: Context) -> NSSearchField {
+        let field = NSSearchField(string: text)
+        field.placeholderString = prompt
+        field.target = context.coordinator
+        field.action = #selector(Coordinator.submit)
+        field.delegate = context.coordinator
+        field.sendsSearchStringImmediately = false
+        field.sendsWholeSearchString = false
+        return field
+    }
+
+    func updateNSView(_ nsView: NSSearchField, context: Context) {
+        if nsView.stringValue != text {
+            nsView.stringValue = text
+        }
+        nsView.placeholderString = prompt
+        context.coordinator.onSubmit = onSubmit
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text, onSubmit: onSubmit)
+    }
+
+    final class Coordinator: NSObject, NSSearchFieldDelegate {
+        @Binding var text: String
+        var onSubmit: () -> Void
+
+        init(text: Binding<String>, onSubmit: @escaping () -> Void) {
+            _text = text
+            self.onSubmit = onSubmit
+        }
+
+        func controlTextDidChange(_ obj: Notification) {
+            guard let field = obj.object as? NSSearchField else { return }
+            text = field.stringValue
+        }
+
+        @objc func submit() {
+            onSubmit()
+        }
+    }
+}
+
+struct PDFKitView: NSViewRepresentable {
+    let document: PDFDocument?
+    let highlightText: String
+    let highlightPage: Int?
+    let onWordSelected: (String, Int, Int) -> Void  // (word, pageIndex, occurrence)
+    let onPDFViewReady: (PDFView) -> Void
+
+    func makeNSView(context: Context) -> PDFView {
+        let pdfView = PDFView()
+        pdfView.autoScales = true
+        pdfView.displayMode = .singlePageContinuous
+        pdfView.document = document
+        pdfView.pageOverlayViewProvider = context.coordinator
+
+        NotificationCenter.default.addObserver(
+            context.coordinator,
+            selector: #selector(Coordinator.selectionChanged(_:)),
+            name: .PDFViewSelectionChanged,
+            object: pdfView
+        )
+
+        DispatchQueue.main.async {
+            onPDFViewReady(pdfView)
+        }
+
+        return pdfView
+    }
+
+    func updateNSView(_ pdfView: PDFView, context: Context) {
+        if pdfView.document !== document {
+            pdfView.document = document
+        }
+        context.coordinator.onWordSelected = onWordSelected
+
+        highlightInPDF(pdfView, context: context)
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onWordSelected: onWordSelected)
+    }
+
+    private func highlightInPDF(_ pdfView: PDFView, context: Context) {
+        guard let document = pdfView.document, !highlightText.isEmpty else {
+            context.coordinator.currentHighlightMatch = nil
+            context.coordinator.repositionGlassOverlay(in: pdfView)
+            return
+        }
+
+        let matches = document.findString(highlightText, withOptions: .caseInsensitive)
+        guard !matches.isEmpty else { return }
+
+        // Prefer matches on the target page, then fall back to nearest page
+        let bestMatch: PDFSelection?
+        if let targetPage = highlightPage {
+            let pageMatches = matches.filter { match in
+                match.pages.first.map { document.index(for: $0) } == targetPage
+            }
+            bestMatch = pageMatches.first
+                ?? findBestMatchByPage(matches, nearPage: targetPage, in: document)
+        } else {
+            bestMatch = findBestMatchByPage(
+                matches,
+                nearPage: context.coordinator.lastPDFPage.map { document.index(for: $0) },
+                in: document
+            )
+        }
+
+        guard let match = bestMatch else { return }
+
+        // --- Jump stabilization (skipped for manual clicks) ---
+        let coord = context.coordinator
+        if coord.bypassStabilization {
+            coord.bypassStabilization = false
+            coord.pendingMatch = nil
+            coord.pendingMatchCount = 0
+        } else if let currentMatch = coord.currentHighlightMatch,
+           let currentPage = currentMatch.pages.first,
+           let newPage = match.pages.first,
+           let doc = pdfView.document {
+
+            let currentPageIdx = doc.index(for: currentPage)
+            let newPageIdx = doc.index(for: newPage)
+            let pageDelta = abs(newPageIdx - currentPageIdx)
+
+            let isFarJump: Bool = {
+                if pageDelta >= 1 { return true }
+                let currentY = currentMatch.bounds(for: currentPage).midY
+                let newY = match.bounds(for: newPage).midY
+                return abs(currentY - newY) > 150
+            }()
+
+            if isFarJump {
+                // Use higher threshold for multi-page jumps, lower for short jumps
+                let threshold = pageDelta > 1
+                    ? Coordinator.longJumpThreshold
+                    : Coordinator.shortJumpThreshold
+
+                if let pending = coord.pendingMatch,
+                   let pendingPage = pending.pages.first,
+                   let matchPage = match.pages.first,
+                   pendingPage === matchPage,
+                   abs(pending.bounds(for: pendingPage).midY - match.bounds(for: matchPage).midY) < 100 {
+                    coord.pendingMatchCount += 1
+                } else {
+                    coord.pendingMatch = match
+                    coord.pendingMatchCount = 1
+                }
+
+                if coord.pendingMatchCount < threshold {
+                    coord.repositionGlassOverlay(in: pdfView)
+                    return
+                }
+                coord.pendingMatch = nil
+                coord.pendingMatchCount = 0
+            } else {
+                coord.pendingMatch = nil
+                coord.pendingMatchCount = 0
+            }
+        }
+
+        coord.lastPDFPage = match.pages.first
+        coord.currentHighlightMatch = match
+
+        // Only scroll if the match is not already visible on screen
+        if let page = match.pages.first {
+            let pageBounds = match.bounds(for: page)
+            let viewRect = pdfView.convert(pageBounds, from: page)
+            let visibleRect = pdfView.bounds.insetBy(dx: 0, dy: 40)
+
+            if !visibleRect.contains(viewRect) {
+                let viewHeight = pdfView.bounds.height
+                let offsetPoints = viewHeight * 0.33
+                let scaleFactor = pdfView.scaleFactor
+                let pageOffset = offsetPoints / scaleFactor
+                let destY = pageBounds.maxY + pageOffset
+
+                let dest = PDFDestination(page: page, at: CGPoint(x: pageBounds.origin.x, y: destY))
+                pdfView.go(to: dest)
+            }
+        }
+
+        // Setup scroll/zoom tracking and position the glass overlay
+        coord.setupScrollTracking(for: pdfView)
+        coord.repositionGlassOverlay(in: pdfView)
+    }
+
+    /// Finds the match on the closest page to the target.
+    private func findBestMatchByPage(_ matches: [PDFSelection], nearPage targetPage: Int?, in document: PDFDocument) -> PDFSelection? {
+        guard !matches.isEmpty else { return nil }
+        guard let targetPage = targetPage else { return matches.first }
+
+        var bestMatch = matches.first!
+        var bestDistance = Int.max
+
+        for match in matches {
+            guard let matchPage = match.pages.first else { continue }
+            let matchPageIndex = document.index(for: matchPage)
+
+            let distance = matchPageIndex - targetPage
+            let adjustedDistance = distance >= 0 ? distance : distance + 10000
+            if adjustedDistance < bestDistance {
+                bestDistance = adjustedDistance
+                bestMatch = match
+            }
+        }
+
+        return bestMatch
+    }
+
+    class Coordinator: NSObject, PDFPageOverlayViewProvider {
+        var onWordSelected: (String, Int, Int) -> Void
+        var lastPDFPage: PDFPage?
+
+        // Glass highlight overlay
+        var glassOverlay: NSView?
+        var currentHighlightMatch: PDFSelection?
+        private var scrollObserver: NSObjectProtocol?
+
+        // Sticky page number overlay
+        var pageNumberOverlay: NSHostingView<AnyView>?
+        var currentVisiblePage: Int = -1
+
+        // Jump stabilization: require consecutive "votes" before jumping far
+        var pendingMatch: PDFSelection?
+        var pendingMatchCount: Int = 0
+        static let shortJumpThreshold = 3   // same page or 1 page away
+        static let longJumpThreshold = 10   // more than 1 page away
+        var bypassStabilization = false  // set true on manual clicks to skip buffering
+        private var zoomObserver: NSObjectProtocol?
+
+        init(onWordSelected: @escaping (String, Int, Int) -> Void) {
+            self.onWordSelected = onWordSelected
+        }
+
+        deinit {
+            if let obs = scrollObserver { NotificationCenter.default.removeObserver(obs) }
+            if let obs = zoomObserver { NotificationCenter.default.removeObserver(obs) }
+        }
+
+        // MARK: - Glass Highlight Overlay
+
+        func setupScrollTracking(for pdfView: PDFView) {
+            guard scrollObserver == nil else { return }
+
+            // Find the internal clip view for scroll tracking
+            func findClipView(_ view: NSView) -> NSClipView? {
+                if let cv = view as? NSClipView { return cv }
+                for sub in view.subviews {
+                    if let cv = findClipView(sub) { return cv }
+                }
+                return nil
+            }
+
+            if let clipView = findClipView(pdfView) {
+                clipView.postsBoundsChangedNotifications = true
+                scrollObserver = NotificationCenter.default.addObserver(
+                    forName: NSView.boundsDidChangeNotification,
+                    object: clipView,
+                    queue: .main
+                ) { [weak self, weak pdfView] _ in
+                    guard let self, let pdfView else { return }
+                    self.repositionGlassOverlay(in: pdfView)
+                    self.updatePageNumberOverlay(in: pdfView)
+                }
+            }
+
+            // Track zoom changes
+            zoomObserver = NotificationCenter.default.addObserver(
+                forName: .PDFViewScaleChanged,
+                object: pdfView,
+                queue: .main
+            ) { [weak self, weak pdfView] _ in
+                guard let self, let pdfView else { return }
+                self.repositionGlassOverlay(in: pdfView)
+                self.updatePageNumberOverlay(in: pdfView)
+            }
+
+            // Initial page number update
+            DispatchQueue.main.async { [weak self, weak pdfView] in
+                guard let self, let pdfView else { return }
+                self.updatePageNumberOverlay(in: pdfView)
+            }
+        }
+
+        func repositionGlassOverlay(in pdfView: PDFView) {
+            guard let match = currentHighlightMatch,
+                  let page = match.pages.first else {
+                glassOverlay?.isHidden = true
+                return
+            }
+
+            let pageBounds = match.bounds(for: page)
+            let viewRect = pdfView.convert(pageBounds, from: page)
+            let padded = viewRect.insetBy(dx: -3, dy: -1)
+
+            // Hide if off-screen
+            if !pdfView.bounds.intersects(padded) {
+                glassOverlay?.isHidden = true
+                return
+            }
+
+            if glassOverlay == nil {
+                let view = NSView()
+                view.wantsLayer = true
+                view.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.18).cgColor
+                view.layer?.cornerRadius = 3
+                pdfView.addSubview(view)
+                glassOverlay = view
+            }
+
+            glassOverlay?.frame = padded
+            glassOverlay?.isHidden = false
+        }
+
+        // MARK: - Sticky Page Number Overlay
+
+        func updatePageNumberOverlay(in pdfView: PDFView) {
+            // Determine which page is visible at the top of the view
+            let topCenter = CGPoint(x: pdfView.bounds.midX, y: pdfView.bounds.maxY - 20)
+            guard let page = pdfView.page(for: topCenter, nearest: true),
+                  let document = pdfView.document else {
+                pageNumberOverlay?.isHidden = true
+                return
+            }
+
+            let pageIndex = document.index(for: page)
+            let totalPages = document.pageCount
+
+            // Create or update the overlay
+            if pageNumberOverlay == nil {
+                let pillView = NSHostingView(rootView: AnyView(
+                    Text("Page \(pageIndex + 1) of \(totalPages)")
+                        .font(.system(size: 12, weight: .medium))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .glassEffect(.regular, in: .capsule)
+                ))
+                pillView.translatesAutoresizingMaskIntoConstraints = false
+                pdfView.addSubview(pillView)
+                NSLayoutConstraint.activate([
+                    pillView.topAnchor.constraint(equalTo: pdfView.topAnchor, constant: 12),
+                    pillView.trailingAnchor.constraint(equalTo: pdfView.trailingAnchor, constant: -16),
+                ])
+                pageNumberOverlay = pillView
+                currentVisiblePage = pageIndex
+            } else if pageIndex != currentVisiblePage {
+                currentVisiblePage = pageIndex
+                pageNumberOverlay?.rootView = AnyView(
+                    Text("Page \(pageIndex + 1) of \(totalPages)")
+                        .font(.system(size: 12, weight: .medium))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .glassEffect(.regular, in: .capsule)
+                )
+            }
+
+            pageNumberOverlay?.isHidden = false
+
+            // Keep it on top of other subviews
+            if let overlay = pageNumberOverlay {
+                pdfView.addSubview(overlay, positioned: .above, relativeTo: nil)
+            }
+        }
+
+        // MARK: - PDFPageOverlayViewProvider
+
+        func pdfView(_ view: PDFView, overlayViewFor page: PDFPage) -> NSView? {
+            return nil
+        }
+
+        // MARK: - Selection
+
+        @objc func selectionChanged(_ notification: Notification) {
+            guard let pdfView = notification.object as? PDFView,
+                  let selection = pdfView.currentSelection,
+                  let selectedText = selection.string,
+                  !selectedText.isEmpty,
+                  let document = pdfView.document else { return }
+
+            guard let page = selection.pages.first else { return }
+            lastPDFPage = page
+
+            let pageIndex = document.index(for: page)
+
+            let trimmed = selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let firstWord = trimmed.split(separator: " ").first.map(String.init) ?? trimmed
+            guard !firstWord.isEmpty else { return }
+
+            // Find all occurrences of this word on this page to determine which one was selected
+            let allMatches = document.findString(firstWord, withOptions: .caseInsensitive)
+            let pageMatches = allMatches.filter { match in
+                match.pages.first.map { document.index(for: $0) } == pageIndex
+            }
+
+            var occurrence = 1
+            if pageMatches.count > 1 {
+                // Compare bounds to find which occurrence is closest to the selection
+                let selBounds = selection.bounds(for: page)
+                var bestDist = Double.infinity
+                for (i, match) in pageMatches.enumerated() {
+                    let matchBounds = match.bounds(for: page)
+                    let dx = Double(matchBounds.midX - selBounds.midX)
+                    let dy = Double(matchBounds.midY - selBounds.midY)
+                    let dist = sqrt(dx * dx + dy * dy)
+                    if dist < bestDist {
+                        bestDist = dist
+                        occurrence = i + 1
+                    }
+                }
+            }
+
+            onWordSelected(firstWord, pageIndex, occurrence)
+        }
+    }
+}
+
+enum SidebarMode {
+    case hidden
+    case reader
+    case editor
+    case search
+    case sections
+}
+
+/// A single search result with its location and a text snippet for display.
+struct SearchResult: Identifiable {
+    let id = UUID()
+    let range: NSRange
+    let snippet: String
+}
+
+/// A pronunciation mapping: find text and replace with spoken form.
+struct PronunciationEntry: Identifiable {
+    let id = UUID()
+    var find: String
+    var replace: String
+}
+
+/// A section header found in the processed text, with indentation level.
+struct SectionItem: Identifiable {
+    let id = UUID()
+    let title: String
+    let utf16Offset: Int
+    let level: Int  // 0 = top-level (roman numeral / numeric), 1 = sub-section (letter / x.y)
+}
+
+struct ContentView: View {
+    @StateObject private var speechManager = SpeechManager()
+    @State private var rawText = ""
+    @State private var cleanedText = ""
+    @State private var pdfDocument: PDFDocument?
+    @State private var pdfHighlightText = ""
+    @State private var pdfHighlightPage: Int?
+    @State private var pdfViewInstance: PDFView?
+    @State private var sidebarMode: SidebarMode = .reader
+    @State private var columnVisibility: NavigationSplitViewVisibility = .automatic
+
+    @State private var speedMultiplier: Double = 2.0 // 0.5 to 4.0
+
+    @State private var searchQuery: String = ""
+    @State private var lastSearchQuery: String = ""
+    @State private var lastSearchResult: NSRange = NSRange(location: NSNotFound, length: 0)
+    @State private var searchResults: [SearchResult] = []
+    @State private var parsedSections: [SectionItem] = []
+    @State private var showPronunciationEditor = false
+    @State private var showOptionsEditor = false
+    @State private var ignoreReferences = true
+    @State private var ignoreBeforeAbstract = true
+    @State private var skipCitations = true
+    @State private var replaceParentheses = true
+    @State private var speakGreekLetters = true
+    @State private var speakMathSymbols = true
+    @State private var removeFiguresAndTables = true
+    @State private var showEditor = false
+    @State private var isImporting = false
+    @State private var importProgress: Double = 0
+    @State private var importPageStatus = ""
+    @State private var isCleaningInBackground = false
+    @State private var backgroundCleanProgress: Double = 0
+    @State private var backgroundCleanStatus = ""
+    @State private var cleanupGeneration = 0
+    @State private var showSummarySheet = false
+    @State private var summaryText = ""
+    @State private var isSummarizing = false
+    @State private var summaryError = ""
+    @State private var pronunciations: [PronunciationEntry] = [
+        PronunciationEntry(find: "vCPU", replace: "virtual CPU"),
+        PronunciationEntry(find: "e.g.", replace: "for example"),
+        PronunciationEntry(find: "i.e.", replace: "that is"),
+        PronunciationEntry(find: "et al.", replace: "and others"),
+        PronunciationEntry(find: "Fig.", replace: "Figure"),
+        PronunciationEntry(find: "#uctuating", replace: "fluctuating"),
+        PronunciationEntry(find: "trade-o!", replace: "trade-off"),
+        PronunciationEntry(find: " \"t ", replace: " fit "),
+        PronunciationEntry(find: " \"rst ", replace: " first "),
+        PronunciationEntry(find: " #oating ", replace: " floating "),
+    ]
+
+    /// Search results sidebar view
+    /// Pronunciation editor popover
+    private var pronunciationEditorView: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Pronunciation Replacements")
+                .font(.headline)
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+                .padding(.bottom, 6)
+
+            HStack(spacing: 8) {
+                Text("Find")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text("Speak As")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Color.clear.frame(width: 28)
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 2)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach($pronunciations) { $entry in
+                    HStack(spacing: 8) {
+                        TextField("Text", text: $entry.find)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 12))
+                        TextField("Spoken as", text: $entry.replace)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 12))
+                        Button(action: {
+                            pronunciations.removeAll { $0.id == entry.id }
+                        }) {
+                            Image(systemName: "minus.circle.fill")
+                                .foregroundStyle(.red)
+                                .font(.system(size: 14))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                Button(action: {
+                    pronunciations.append(PronunciationEntry(find: "", replace: ""))
+                }) {
+                    HStack {
+                        Image(systemName: "plus.circle.fill")
+                        Text("Add Replacement")
+                    }
+                    .font(.system(size: 12))
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 4)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+
+            Divider()
+
+            HStack {
+                Button("Close") {
+                    showPronunciationEditor = false
+                }
+                .keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("Apply Now") {
+                    reprocessText()
+                    showPronunciationEditor = false
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var optionsEditorView: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Options")
+                .font(.headline)
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+                .padding(.bottom, 6)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Content")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .textCase(.uppercase)
+
+                Toggle(isOn: $ignoreBeforeAbstract) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Ignore Before Abstract")
+                            .font(.system(size: 13))
+                        Text("Remove text before the Abstract section")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Toggle(isOn: $ignoreReferences) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Ignore References")
+                            .font(.system(size: 13))
+                        Text("Truncate text after the References section")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Toggle(isOn: $skipCitations) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Skip Citations")
+                            .font(.system(size: 13))
+                        Text("Remove inline citation brackets like [1], [2-5]")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Toggle(isOn: $removeFiguresAndTables) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Remove Figures & Tables")
+                            .font(.system(size: 13))
+                        Text("Use Apple Intelligence to strip figure captions, table data, and axis labels")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 8)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Text Processing")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .textCase(.uppercase)
+
+                Toggle(isOn: $replaceParentheses) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Replace Parentheses")
+                            .font(.system(size: 13))
+                        Text("Convert parentheses to commas for smoother speech")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Toggle(isOn: $speakGreekLetters) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Speak Greek Letters")
+                            .font(.system(size: 13))
+                        Text("Read Greek symbols aloud (e.g. \u{03B1} as \"alpha\")")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Toggle(isOn: $speakMathSymbols) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Speak Math Symbols")
+                            .font(.system(size: 13))
+                        Text("Read math symbols aloud (e.g. \u{2264} as \"less than or equal to\")")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text("View")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .textCase(.uppercase)
+
+                Toggle(isOn: $showEditor) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Show Editor")
+                            .font(.system(size: 13))
+                        Text("Show the raw text editor tab in the sidebar")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+
+            Divider()
+
+            HStack {
+                Spacer()
+                Button("Done") {
+                    showOptionsEditor = false
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var summarySheetView: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Image(systemName: "apple.intelligence")
+                    .font(.system(size: 16))
+                Text("Section Summary")
+                    .font(.headline)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 4)
+
+            if !currentSectionName.isEmpty {
+                Text(currentSectionName)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 6)
+            }
+
+            Divider()
+
+            if isSummarizing {
+                VStack(spacing: 12) {
+                    Spacer()
+                    ProgressView()
+                        .scaleEffect(1.2)
+                    Text("Summarizing with Apple Intelligence...")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity)
+            } else if !summaryError.isEmpty {
+                VStack(spacing: 8) {
+                    Spacer()
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.system(size: 28))
+                        .foregroundStyle(.orange)
+                    Text(summaryError)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 20)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity)
+            } else {
+                ScrollView {
+                    Text(summaryText)
+                        .font(.system(size: 13))
+                        .textSelection(.enabled)
+                        .padding(16)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+
+            Divider()
+
+            HStack {
+                Button("Copy") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(summaryText, forType: .string)
+                }
+                .disabled(summaryText.isEmpty || isSummarizing)
+                Spacer()
+                Button("Done") {
+                    showSummarySheet = false
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+        }
+    }
+
+    /// Get the text of the current section based on cursor position
+    private func currentSectionText() -> String {
+        let cursor = speechManager.cursorUTF16
+        let nsText = cleanedText as NSString
+        guard nsText.length > 0 else { return cleanedText }
+
+        guard !parsedSections.isEmpty else { return cleanedText }
+
+        // Find current section
+        var currentIdx = 0
+        for (i, section) in parsedSections.enumerated() {
+            if section.utf16Offset <= cursor {
+                currentIdx = i
+            } else {
+                break
+            }
+        }
+
+        let start = parsedSections[currentIdx].utf16Offset
+        let end: Int
+        if currentIdx + 1 < parsedSections.count {
+            end = parsedSections[currentIdx + 1].utf16Offset
+        } else {
+            end = nsText.length
+        }
+
+        let range = NSRange(location: start, length: end - start)
+        return nsText.substring(with: range)
+    }
+
+    /// Summarize the current section using Apple Intelligence
+    private func summarizeCurrentSection() {
+        let model = SystemLanguageModel.default
+
+        switch model.availability {
+        case .available:
+            break
+        case .unavailable(.deviceNotEligible):
+            summaryError = "Apple Intelligence is not available on this device."
+            summaryText = ""
+            showSummarySheet = true
+            return
+        case .unavailable(.appleIntelligenceNotEnabled):
+            summaryError = "Apple Intelligence is available but not enabled. Enable it in System Settings."
+            summaryText = ""
+            showSummarySheet = true
+            return
+        case .unavailable(.modelNotReady):
+            summaryError = "The language model isn't ready yet. Please try again later."
+            summaryText = ""
+            showSummarySheet = true
+            return
+        case .unavailable:
+            summaryError = "Apple Intelligence is unavailable."
+            summaryText = ""
+            showSummarySheet = true
+            return
+        }
+
+        let sectionText = currentSectionText()
+        guard !sectionText.isEmpty else { return }
+
+        summaryText = ""
+        summaryError = ""
+        isSummarizing = true
+        showSummarySheet = true
+
+        Task {
+            do {
+                let instructions = """
+                    You are a helpful research assistant. Provide a concise and comprehensive \
+                    summary of the given text. Capture the main points and convey the author's \
+                    intended meaning accurately. Do not add any information not in the original \
+                    text. Keep the summary focused and appropriately brief.
+                    """
+                let session = LanguageModelSession(instructions: instructions)
+                let response = try await session.respond(to: sectionText)
+                await MainActor.run {
+                    summaryText = response.content
+                    isSummarizing = false
+                }
+            } catch {
+                await MainActor.run {
+                    summaryError = "Summarization failed: \(error.localizedDescription)"
+                    isSummarizing = false
+                }
+            }
+        }
+    }
+
+    /// Build the current text processor options from state
+    private var textProcessorOptions: TextProcessorOptions {
+        TextProcessorOptions(
+            skipCitations: skipCitations,
+            replaceParentheses: replaceParentheses,
+            speakGreekLetters: speakGreekLetters,
+            speakMathSymbols: speakMathSymbols
+        )
+    }
+
+    /// Reprocess the raw text with current pronunciation replacements
+    private func reprocessText() {
+        let wasPlaying = speechManager.isPlaying
+        if wasPlaying {
+            speechManager.stop()
+        }
+        cleanedText = applyPronunciations(TextProcessor.process(rawText, options: textProcessorOptions))
+        parseSections()
+        if wasPlaying {
+            speechManager.play(text: cleanedText)
+        }
+    }
+
+    /// Apply pronunciation find-replace mappings to text
+    private func applyPronunciations(_ text: String) -> String {
+        var result = text
+
+        // Strip text before Abstract if enabled
+        if ignoreBeforeAbstract {
+            if let abstractRange = findAbstractRange(in: result) {
+                result = String(result[abstractRange.lowerBound...])
+            }
+        }
+
+        // Truncate after References if enabled
+        if ignoreReferences {
+            let patterns = ["\n\nReferences\n\n", "\n\nREFERENCES\n\n", "\n\nReferences\n", "\n\nREFERENCES\n"]
+            for pattern in patterns {
+                if let range = result.range(of: pattern, options: .caseInsensitive) {
+                    result = String(result[result.startIndex..<range.lowerBound])
+                    break
+                }
+            }
+        }
+
+        for entry in pronunciations {
+            guard !entry.find.isEmpty else { continue }
+            result = result.replacingOccurrences(of: entry.find, with: entry.replace)
+        }
+        return result
+    }
+
+    /// Find the range where Abstract starts in the text.
+    /// Supports: "Abstract\n", "Abstract—", "ABSTRACT\n", "ABSTRACT—", etc.
+    private func findAbstractRange(in text: String) -> Range<String.Index>? {
+        // Try regex: "Abstract" followed by optional whitespace then em-dash, en-dash, hyphen, colon, period, or newline
+        // This handles both "Abstract\n..." (standalone) and "Abstract—Some text..." (inline)
+        if let regex = try? NSRegularExpression(pattern: #"(?i)(?:^|\n\n?)abstract(?:\s*[—–\-:\.]\s*|\s*\n)"#, options: []) {
+            let nsText = text as NSString
+            if let match = regex.firstMatch(in: text, options: [], range: NSRange(location: 0, length: nsText.length)) {
+                let matchRange = match.range
+                // Find the start of "Abstract" within the match (skip leading newlines)
+                let matchStr = nsText.substring(with: matchRange)
+                let abstractLocalRange = (matchStr as NSString).range(of: "abstract", options: .caseInsensitive)
+                if abstractLocalRange.location != NSNotFound {
+                    let abstractStart = matchRange.location + abstractLocalRange.location
+                    return Range(NSRange(location: abstractStart, length: 0), in: text)
+                }
+            }
+        }
+
+        // Fallback: check if text starts with "abstract"
+        let lower = text.lowercased()
+        if lower.hasPrefix("abstract") {
+            return text.startIndex..<text.startIndex
+        }
+
+        return nil
+    }
+
+    private var searchResultsView: some View {
+        VStack(spacing: 0) {
+            if searchResults.isEmpty {
+                Spacer()
+                Text(searchQuery.isEmpty ? "Use the search bar to find text" : "No results found")
+                    .foregroundStyle(.secondary)
+                    .font(.system(size: 13))
+                Spacer()
+            } else {
+                HStack {
+                    Text("\(searchResults.count) result\(searchResults.count == 1 ? "" : "s")")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+
+                Divider()
+
+                List {
+                    ForEach(searchResults) { result in
+                        Button {
+                            jumpToSearchResult(result)
+                        } label: {
+                            Text(highlightedSnippet(result.snippet, query: searchQuery))
+                                .font(.system(size: 13))
+                                .lineLimit(3)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.vertical, 2)
+                    }
+                    Color.clear.frame(height: 80)
+                        .listRowSeparator(.hidden)
+                }
+                .listStyle(.plain)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Creates an AttributedString with the search query highlighted in bold
+    private func highlightedSnippet(_ snippet: String, query: String) -> AttributedString {
+        var attributed = AttributedString(snippet)
+        let lowerSnippet = snippet.lowercased()
+        let lowerQuery = query.lowercased()
+        var searchStart = lowerSnippet.startIndex
+
+        while let range = lowerSnippet.range(of: lowerQuery, range: searchStart..<lowerSnippet.endIndex) {
+            let attrStart = AttributedString.Index(range.lowerBound, within: attributed)!
+            let attrEnd = AttributedString.Index(range.upperBound, within: attributed)!
+            attributed[attrStart..<attrEnd].font = .system(size: 13, weight: .bold)
+            attributed[attrStart..<attrEnd].foregroundColor = .accentColor
+            searchStart = range.upperBound
+        }
+
+        return attributed
+    }
+
+    /// Sections sidebar view — tree-style list of paper sections
+    private var sectionsView: some View {
+        VStack(spacing: 0) {
+            if parsedSections.isEmpty {
+                Spacer()
+                Text("No sections found")
+                    .foregroundStyle(.secondary)
+                    .font(.system(size: 13))
+                Text("Import a PDF to see its structure")
+                    .foregroundStyle(.tertiary)
+                    .font(.system(size: 12))
+                Spacer()
+            } else {
+                HStack {
+                    Text("\(parsedSections.count) section\(parsedSections.count == 1 ? "" : "s")")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+
+                Divider()
+
+                List {
+                    ForEach(parsedSections) { section in
+                        Button {
+                            jumpToSection(section)
+                        } label: {
+                            HStack(spacing: 6) {
+                                if section.level > 0 {
+                                    Image(systemName: "arrow.turn.down.right")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(.tertiary)
+                                }
+                                Text(section.title)
+                                    .font(.system(size: section.level == 0 ? 13 : 12,
+                                                  weight: section.level == 0 ? .semibold : .regular))
+                                    .lineLimit(2)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .padding(.leading, CGFloat(section.level) * 12)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.vertical, 2)
+                    }
+                    Color.clear.frame(height: 80)
+                        .listRowSeparator(.hidden)
+                }
+                .listStyle(.plain)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Parse section headers from cleaned text
+    private func parseSections() {
+        let text = cleanedText
+        guard !text.isEmpty else {
+            parsedSections = []
+            return
+        }
+
+        var sections: [SectionItem] = []
+        let nsText = text as NSString
+
+        // Match section headers: standalone names, roman numeral, numeric, lettered
+        let standaloneNames = [
+            "Abstract", "Introduction", "Background", "Methods", "Methodology",
+            "Results", "Discussion", "Conclusion", "Conclusions", "References",
+            "Acknowledgments", "Acknowledgements", "Appendix", "Appendices",
+            "Evaluation", "Overview", "Motivation", "Limitations", "Related Work",
+        ]
+        // Build case-insensitive standalone pattern
+        let standaloneAlt = standaloneNames.map { NSRegularExpression.escapedPattern(for: $0) }.joined(separator: "|")
+        let patterns: [(pattern: String, level: Int)] = [
+            // Standalone section headers (case-insensitive via (?i))
+            (#"(?:^|\n\n)((?i)(?:"# + standaloneAlt + #")\S*[^\n]*)"#, 0),
+            // Roman numeral sections: "I. TITLE", "II. TITLE"
+            (#"(?:^|\n\n)([IVXLCDM]+\.\s+(?=[^\n]*[a-zA-Z])[^\n]+)"#, 0),
+            // Top-level numeric: "1 Title" or "1. Title" (no dot in number)
+            (#"(?:^|\n\n)(\d+\.?\s+(?=[^\n]*[a-zA-Z])[^\n]+)"#, 0),
+            // Sub-section numeric: "1.1 Title", "2.3.1 Title"
+            (#"(?:^|\n\n)(\d+\.\d+[\.\d]*\.?\s+(?=[^\n]*[a-zA-Z])[^\n]+)"#, 1),
+            // Lettered sub-sections: "A. Title", "B. Title"
+            (#"(?:^|\n\n)([A-Z]\.\s+(?=[^\n]*[a-zA-Z])[^\n]+)"#, 1),
+        ]
+
+        // Collect all matches with their positions
+        struct RawMatch {
+            let title: String
+            let offset: Int
+            let level: Int
+        }
+
+        var rawMatches: [RawMatch] = []
+
+        for (pattern, level) in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { continue }
+            let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
+            for match in matches {
+                let titleRange = match.range(at: 1)
+                let title = nsText.substring(with: titleRange).trimmingCharacters(in: .whitespaces)
+                // Skip very short or PAGE marker lines
+                if title.count < 3 || title.hasPrefix("PAGE ") { continue }
+                rawMatches.append(RawMatch(title: title, offset: titleRange.location, level: level))
+            }
+        }
+
+        // Sort by position and deduplicate overlapping matches
+        rawMatches.sort { $0.offset < $1.offset }
+
+        var lastEnd = -1
+        for raw in rawMatches {
+            if raw.offset <= lastEnd { continue }  // skip overlapping
+            sections.append(SectionItem(title: raw.title, utf16Offset: raw.offset, level: raw.level))
+            lastEnd = raw.offset + (raw.title as NSString).length
+        }
+
+        parsedSections = sections
+    }
+
+    /// Jump to a section in the reader view
+    /// Move cursor to Abstract if found in the text
+    private func jumpToAbstract() {
+        let nsText = cleanedText as NSString
+        guard nsText.length > 0 else { return }
+
+        // Use the same detection logic as findAbstractRange
+        if let regex = try? NSRegularExpression(pattern: #"(?i)(?:^|\n\n?)abstract(?:\s*[—–\-:\.]\s*|\s*\n)"#, options: []) {
+            if let match = regex.firstMatch(in: cleanedText, options: [], range: NSRange(location: 0, length: nsText.length)) {
+                let matchStr = nsText.substring(with: match.range)
+                let abstractLocalRange = (matchStr as NSString).range(of: "abstract", options: .caseInsensitive)
+                if abstractLocalRange.location != NSNotFound {
+                    speechManager.cursorUTF16 = match.range.location + abstractLocalRange.location
+                    return
+                }
+            }
+        }
+
+        // Fallback: check if text starts with Abstract
+        let lower = cleanedText.lowercased()
+        if lower.hasPrefix("abstract") {
+            speechManager.cursorUTF16 = 0
+        }
+    }
+
+    /// Jump to a specific section in the reader view
+    private func jumpToSection(_ section: SectionItem) {
+        if let coordinator = pdfViewInstance?.pageOverlayViewProvider as? PDFKitView.Coordinator {
+            coordinator.bypassStabilization = true
+        }
+
+        speechManager.stop()
+        speechManager.cursorUTF16 = section.utf16Offset
+        speechManager.cursorLengthUTF16 = (section.title as NSString).length
+
+        sidebarMode = .reader
+    }
+
+    /// Estimated remaining listening time based on cursor position and speed
+    private var estimatedTimeRemaining: String {
+        let totalUTF16 = cleanedText.utf16.count
+        guard totalUTF16 > 0 else { return "--:--" }
+
+        let remainingUTF16 = max(totalUTF16 - speechManager.cursorUTF16, 0)
+        let fractionRemaining = Double(remainingUTF16) / Double(totalUTF16)
+
+        // Estimate total word count (average ~5 chars per word in UTF-16)
+        let totalWords = Double(totalUTF16) / 5.0
+        let remainingWords = totalWords * fractionRemaining
+
+        // Base TTS rate ~180 words per minute at 1x speed
+        let wordsPerMinute = 180.0 * Double(speedMultiplier)
+        let minutesLeft = remainingWords / wordsPerMinute
+
+        let totalSeconds = Int(minutesLeft * 60)
+        let hours = totalSeconds / 3600
+        let minutes = (totalSeconds % 3600) / 60
+        let seconds = totalSeconds % 60
+
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, seconds)
+        } else {
+            return String(format: "%d:%02d", minutes, seconds)
+        }
+    }
+
+    /// Playback progress as a percentage
+    private var playbackProgress: Double {
+        let totalUTF16 = cleanedText.utf16.count
+        guard totalUTF16 > 0 else { return 0 }
+        return min(Double(speechManager.cursorUTF16) / Double(totalUTF16), 1.0)
+    }
+
+    @State private var showSpeedPopover = false
+    @State private var showSectionJumpPopover = false
+
+    /// Speed presets with icons and estimated WPM
+    private var speedPresets: [(speed: Double, icon: String, wpm: Int)] {
+        [
+            (0.5, "tortoise.fill", estimatedWPM(for: 0.5)),
+            (1.0, "figure.walk", estimatedWPM(for: 1.0)),
+            (2.0, "hare.fill", estimatedWPM(for: 2.0)),
+            (3.0, "car.fill", estimatedWPM(for: 3.0)),
+            (4.0, "airplane", estimatedWPM(for: 4.0)),
+        ]
+    }
+
+    /// Returns the SF Symbol icon for a given speed
+    private func speedIcon(for speed: Double) -> String {
+        if speed < 0.75 { return "tortoise.fill" }
+        if speed < 1.5 { return "figure.walk" }
+        if speed < 2.5 { return "hare.fill" }
+        if speed < 3.5 { return "car.fill" }
+        return "airplane"
+    }
+
+    /// Estimated words per minute at a given speed multiplier
+    private func estimatedWPM(for speed: Double) -> Int {
+        Int(180.0 * speed)
+    }
+
+    /// The name of the section the cursor is currently in
+    private var currentSectionName: String {
+        guard !parsedSections.isEmpty else { return "" }
+        let cursor = speechManager.cursorUTF16
+        var current: SectionItem?
+        for section in parsedSections {
+            if section.utf16Offset <= cursor {
+                current = section
+            } else {
+                break
+            }
+        }
+        return current?.title ?? ""
+    }
+
+    /// Floating liquid glass playback pill overlay — Apple Music style layout
+    private var playbackPill: some View {
+        HStack(spacing: 16) {
+            // Left: transport controls
+            HStack(spacing: 20) {
+                Button(action: {
+                    speechManager.skipBackward(in: cleanedText)
+                }) {
+                    Image(systemName: "backward.fill")
+                        .font(.system(size: 20))
+                }
+                .buttonStyle(.plain)
+                .help("Previous sentence")
+
+                if speechManager.isPlaying {
+                    Button(action: {
+                        speechManager.pause()
+                    }) {
+                        Image(systemName: "pause.fill")
+                            .font(.system(size: 26))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Pause")
+                } else {
+                    Button(action: {
+                        speechManager.play(text: cleanedText)
+                    }) {
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 26))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Play from cursor")
+                }
+
+                Button(action: {
+                    speechManager.skipForward(in: cleanedText)
+                }) {
+                    Image(systemName: "forward.fill")
+                        .font(.system(size: 20))
+                }
+                .buttonStyle(.plain)
+                .help("Next sentence")
+            }
+
+            Divider()
+                .frame(height: 24)
+
+            // Center: section name + progress bar
+            if !cleanedText.isEmpty {
+                VStack(spacing: 5) {
+                    if !currentSectionName.isEmpty {
+                        Button(action: {
+                            showSectionJumpPopover.toggle()
+                        }) {
+                            HStack(spacing: 4) {
+                                Text(currentSectionName)
+                                    .font(.system(size: 12, weight: .medium))
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                                Image(systemName: "chevron.up.chevron.down")
+                                    .font(.system(size: 8))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .popover(isPresented: $showSectionJumpPopover) {
+                            ScrollView {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    ForEach(parsedSections) { section in
+                                        Button(action: {
+                                            showSectionJumpPopover = false
+                                            jumpToSection(section)
+                                        }) {
+                                            Text(section.title)
+                                                .font(.system(size: 12))
+                                                .padding(EdgeInsets(top: 4, leading: section.level > 0 ? 16 : 0, bottom: 4, trailing: 0))
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                                .contentShape(Rectangle())
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+                                .padding(10)
+                            }
+                            .frame(width: 260, height: min(CGFloat(parsedSections.count) * 28 + 20, 300))
+                        }
+                    }
+
+                    HStack(spacing: 6) {
+                        Text(String(format: "%.0f%%", playbackProgress * 100))
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 28, alignment: .trailing)
+
+                        GeometryReader { geo in
+                            ZStack(alignment: .leading) {
+                                Capsule()
+                                    .fill(.primary.opacity(0.15))
+                                    .frame(height: 6)
+                                Capsule()
+                                    .fill(.primary.opacity(0.5))
+                                    .frame(width: max(geo.size.width * playbackProgress, 0), height: 6)
+                            }
+                            .contentShape(Rectangle())
+                            .onTapGesture { location in
+                                let fraction = max(0, min(location.x / geo.size.width, 1.0))
+                                let totalUTF16 = cleanedText.utf16.count
+                                let targetUTF16 = Int(fraction * Double(totalUTF16))
+
+                                // Snap to nearest word boundary
+                                let idx = String.Index(utf16Offset: min(targetUTF16, totalUTF16), in: cleanedText)
+                                var wordStart = idx
+                                while wordStart > cleanedText.startIndex && !cleanedText[cleanedText.index(before: wordStart)].isWhitespace {
+                                    wordStart = cleanedText.index(before: wordStart)
+                                }
+
+                                if let coordinator = pdfViewInstance?.pageOverlayViewProvider as? PDFKitView.Coordinator {
+                                    coordinator.bypassStabilization = true
+                                }
+
+                                speechManager.cursorUTF16 = wordStart.utf16Offset(in: cleanedText)
+                                speechManager.cursorLengthUTF16 = 0
+
+                                if speechManager.isPlaying {
+                                    speechManager.stop()
+                                    speechManager.play(text: cleanedText)
+                                }
+                            }
+                        }
+                        .frame(width: 120, height: 6)
+
+                        HStack(spacing: 2) {
+                            Image(systemName: "clock")
+                                .font(.system(size: 9))
+                            Text(estimatedTimeRemaining)
+                                .font(.system(size: 10, design: .monospaced))
+                        }
+                        .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(width: 220)
+            }
+
+            Divider()
+                .frame(height: 24)
+
+            // Right: speed + voice icons
+            HStack(spacing: 16) {
+                Button(action: {
+                    showSpeedPopover.toggle()
+                }) {
+                    VStack(spacing: 2) {
+                        Image(systemName: speedIcon(for: speedMultiplier))
+                            .font(.system(size: 18))
+                        Text(String(format: "%.1fx", speedMultiplier))
+                            .font(.system(size: 10, weight: .medium, design: .rounded))
+                    }
+                }
+                .buttonStyle(.plain)
+                .help("Playback speed")
+                .popover(isPresented: $showSpeedPopover) {
+                    VStack(spacing: 12) {
+                        Text("Playback Speed")
+                            .font(.system(size: 13, weight: .semibold))
+
+                        Image(systemName: speedIcon(for: speedMultiplier))
+                            .font(.system(size: 32))
+                            .padding(.top, 4)
+
+                        Text(String(format: "%.1fx", speedMultiplier))
+                            .font(.system(size: 22, weight: .bold, design: .rounded))
+
+                        Text(String(format: "~%d words/min", estimatedWPM(for: speedMultiplier)))
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+
+                        HStack(spacing: 8) {
+                            Image(systemName: "tortoise.fill")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                            Slider(value: $speedMultiplier, in: 0.5...4.0, step: 0.1)
+                                .frame(width: 160)
+                                .onChange(of: speedMultiplier) { _, newValue in
+                                    speechManager.setRate(Float(newValue), restartWith: cleanedText)
+                                }
+                            Image(systemName: "airplane")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Divider()
+
+                        HStack(spacing: 12) {
+                            ForEach(speedPresets, id: \.speed) { preset in
+                                Button(action: {
+                                    speedMultiplier = preset.speed
+                                    speechManager.setRate(Float(preset.speed), restartWith: cleanedText)
+                                }) {
+                                    VStack(spacing: 3) {
+                                        Image(systemName: preset.icon)
+                                            .font(.system(size: 16))
+                                        Text(String(format: "%.1fx", preset.speed))
+                                            .font(.system(size: 10, weight: .medium, design: .rounded))
+                                        Text("\(preset.wpm)")
+                                            .font(.system(size: 9))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .frame(width: 44, height: 50)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 8)
+                                            .fill(Color.primary.opacity(abs(speedMultiplier - preset.speed) < 0.05 ? 0.1 : 0))
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                    .padding(16)
+                }
+
+                Menu {
+                    ForEach(speechManager.availableVoices, id: \.identifier) { voice in
+                        Button(action: {
+                            speechManager.setVoice(voice.identifier, restartWith: cleanedText)
+                        }) {
+                            if speechManager.selectedVoiceID == voice.identifier {
+                                Label(voice.name, systemImage: "checkmark")
+                            } else {
+                                Text(voice.name)
+                            }
+                        }
+                    }
+                } label: {
+                    Image(systemName: "person.wave.2.fill")
+                        .font(.system(size: 24))
+                        .help("Voice")
+                }
+                .menuStyle(.borderlessButton)
+            }
+        }
+        .foregroundStyle(.primary)
+        .padding(.horizontal, 30)
+        .padding(.vertical, 18)
+        .glassEffect(.regular, in: .capsule)
+    }
+
+    /// Detail view: PDF viewer + thumbnails with floating overlays
+    private var detailView: some View {
+        HStack(spacing: 0) {
+            if pdfDocument != nil {
+                ZStack {
+                    PDFKitView(
+                        document: pdfDocument,
+                        highlightText: pdfHighlightText,
+                        highlightPage: pdfHighlightPage,
+                        onWordSelected: { word, _, _ in
+                            searchQuery = word
+                            performSearch()
+                        },
+                        onPDFViewReady: { view in
+                            pdfViewInstance = view
+                        }
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                    // Bottom fade overlay on PDF view
+                    VStack(spacing: 0) {
+                        Spacer()
+                        LinearGradient(
+                            colors: [.clear, Color(nsColor: .windowBackgroundColor)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                        .frame(height: 100)
+                    }
+                    .allowsHitTesting(false)
+
+                    // Floating playback pill at the bottom — centered over PDF area
+                    VStack {
+                        Spacer()
+                        playbackPill
+                            .padding(.bottom, 20)
+                    }
+                }
+
+                Divider()
+
+                PDFThumbnailStrip(pdfView: pdfViewInstance)
+                    .frame(width: 130)
+                    .padding(.trailing, 4)
+                    .frame(maxHeight: .infinity)
+            } else {
+                VStack {
+                    Spacer()
+                    Text("No PDF loaded")
+                        .foregroundStyle(.secondary)
+                        .font(.system(size: 14))
+                    Text("Click Import PDF to open a file")
+                        .foregroundStyle(.tertiary)
+                        .font(.system(size: 12))
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(nsColor: .controlBackgroundColor))
+            }
+
+            // Import progress overlay
+            if isImporting {
+                ZStack {
+                    Color.black.opacity(0.3)
+                        .ignoresSafeArea()
+
+                    VStack(spacing: 12) {
+                        ProgressView(value: importProgress)
+                            .progressViewStyle(.linear)
+                            .frame(width: 200)
+                        Text(importPageStatus)
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(24)
+                    .glassEffect(.regular, in: .rect(cornerRadius: 12))
+                }
+            }
+        }
+    }
+
+    /// Sidebar content with floating liquid glass tab bar
+    private var sidebarView: some View {
+        ZStack(alignment: .bottom) {
+            Group {
+                switch sidebarMode {
+                case .reader:
+                    ReaderTextView(
+                        text: (cleanedText.isEmpty ? "" : cleanedText) + "\n\n\n\n\n",
+                        cursorUTF16: speechManager.cursorUTF16,
+                        cursorLengthUTF16: speechManager.cursorLengthUTF16,
+                        onWordClicked: { utf16Offset in
+                            jumpCursor(to: utf16Offset)
+                        }
+                    )
+                case .editor:
+                    TextEditor(text: $rawText)
+                        .font(.system(size: 14))
+                        .padding(4)
+                        .contentMargins(.bottom, 60)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                case .search:
+                    searchResultsView
+                case .sections:
+                    sectionsView
+                case .hidden:
+                    EmptyView()
+                }
+            }
+
+            // Bottom fade overlay: transparent to solid background
+            VStack(spacing: 0) {
+                Spacer()
+                LinearGradient(
+                    colors: [.clear, Color(nsColor: .windowBackgroundColor)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: 120)
+            }
+            .allowsHitTesting(false)
+
+            // Floating liquid glass tab bar with hit-testing blocker
+            VStack {
+                Spacer()
+                HStack(spacing: 4) {
+                    sidebarTabButton(icon: "person.wave.2.fill", mode: .reader)
+                    if showEditor {
+                        sidebarTabButton(icon: "square.and.pencil", mode: .editor)
+                    }
+                    sidebarTabButton(icon: "list.bullet.indent", mode: .sections)
+                    sidebarTabButton(icon: "magnifyingglass", mode: .search)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .glassEffect(.regular, in: .capsule)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 10)
+            }
+            .background(
+                VStack {
+                    Spacer()
+                    Color.clear
+                        .frame(height: 50)
+                        .contentShape(Rectangle())
+                }
+            )
+            .allowsHitTesting(true)
+        }
+        .navigationSplitViewColumnWidth(min: 200, ideal: 300, max: 500)
+    }
+
+    private var mainContent: some View {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            sidebarView
+        } detail: {
+            detailView
+        }
+        .toolbar {
+            ToolbarItemGroup(placement: .navigation) {
+                Button(action: importPDF) {
+                    Label("Load", systemImage: "doc.fill")
+                }
+                .help("Load PDF")
+
+                Button(action: { showPronunciationEditor = true }) {
+                    Label("Pronounce", systemImage: "text.word.spacing")
+                }
+                .help("Edit pronunciation replacements")
+
+                Button(action: { showOptionsEditor = true }) {
+                    Label("Options", systemImage: "gearshape")
+                }
+                .help("Reader options")
+
+                Button(action: { summarizeCurrentSection() }) {
+                    Label("Summarize", systemImage: "apple.intelligence")
+                }
+                .help("Summarize current section with Apple Intelligence")
+                .disabled(cleanedText.isEmpty)
+
+                if isCleaningInBackground {
+                    HStack(spacing: 6) {
+                        ProgressView(value: backgroundCleanProgress)
+                            .progressViewStyle(.linear)
+                            .frame(width: 60)
+                        Text(backgroundCleanStatus)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .help("AI is removing figures and tables in the background")
+                }
+            }
+
+            ToolbarItemGroup(placement: .primaryAction) {
+                Spacer()
+
+                ToolbarSearchField(text: $searchQuery, prompt: "Search") {
+                    performSearch()
+                }
+                .frame(width: 260)
+            }
+        }
+        .sheet(isPresented: $showPronunciationEditor) {
+            pronunciationEditorView
+                .frame(width: 450)
+        }
+        .sheet(isPresented: $showOptionsEditor) {
+            optionsEditorView
+                .frame(width: 350)
+        }
+        .sheet(isPresented: $showSummarySheet) {
+            summarySheetView
+                .frame(width: 500, height: 400)
+        }
+        .frame(minWidth: 900, minHeight: 500)
+    }
+
+    var body: some View {
+        mainContent
+            .onChange(of: searchQuery) { _, newValue in
+                let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty {
+                    lastSearchQuery = ""
+                    lastSearchResult = NSRange(location: NSNotFound, length: 0)
+                    speechManager.cursorLengthUTF16 = 0
+                } else if trimmed != lastSearchQuery {
+                    lastSearchResult = NSRange(location: NSNotFound, length: 0)
+                }
+            }
+            .onChange(of: ignoreReferences) { _, _ in reprocessText() }
+            .onChange(of: ignoreBeforeAbstract) { _, _ in reprocessText() }
+            .onChange(of: skipCitations) { _, _ in reprocessText() }
+            .onChange(of: replaceParentheses) { _, _ in reprocessText() }
+            .onChange(of: speakGreekLetters) { _, _ in reprocessText() }
+            .onChange(of: speakMathSymbols) { _, _ in reprocessText() }
+            .onChange(of: showEditor) { _, newValue in
+                if !newValue && sidebarMode == .editor {
+                    sidebarMode = .reader
+                }
+            }
+            .onChange(of: rawText) { _, newValue in
+                let wasPlaying = speechManager.isPlaying
+                if wasPlaying { speechManager.stop() }
+                cleanedText = applyPronunciations(TextProcessor.process(newValue, options: textProcessorOptions))
+                speechManager.resetCursor()
+                parseSections()
+                jumpToAbstract()
+            }
+            .onChange(of: speechManager.cursorUTF16) { _, _ in
+                updatePDFHighlight()
+            }
+            .onAppear {
+                if pdfDocument == nil {
+                    importPDF()
+                }
+            }
+            .onDisappear {
+                speechManager.stop()
+            }
+    }
+
+    // MARK: - Sidebar Management
+
+    /// A single tab button for the sidebar pill. Selected tab gets its own glass highlight.
+    private func sidebarTabButton(icon: String, mode: SidebarMode) -> some View {
+        let isSelected = sidebarMode == mode
+        return Button {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                sidebarMode = mode
+            }
+        } label: {
+            Image(systemName: icon)
+                .font(.system(size: 16, weight: isSelected ? .semibold : .regular))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(
+            Group {
+                if isSelected {
+                    Capsule()
+                        .fill(.white.opacity(0.2))
+                }
+            }
+        )
+        .opacity(isSelected ? 1.0 : 0.45)
+    }
+    
+    // MARK: - Page Mapping
+
+    // MARK: - Search
+
+    private func performSearch() {
+        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return }
+        guard !cleanedText.isEmpty else { return }
+
+        // Bypass stabilization so the PDF highlight jumps immediately
+        if let coordinator = pdfViewInstance?.pageOverlayViewProvider as? PDFKitView.Coordinator {
+            coordinator.bypassStabilization = true
+        }
+
+        let nsText = cleanedText as NSString
+        let textLength = nsText.length
+        guard textLength > 0 else { return }
+
+        // Find ALL matches and populate search results
+        var results: [SearchResult] = []
+        var searchRange = NSRange(location: 0, length: textLength)
+        let contextChars = 40
+
+        while searchRange.location < textLength {
+            let found = nsText.range(of: query, options: [.caseInsensitive], range: searchRange)
+            guard found.location != NSNotFound else { break }
+
+            // Build snippet with surrounding context
+            let snippetStart = max(0, found.location - contextChars)
+            let snippetEnd = min(textLength, found.location + found.length + contextChars)
+            var snippet = nsText.substring(with: NSRange(location: snippetStart, length: snippetEnd - snippetStart))
+            snippet = snippet.replacingOccurrences(of: "\n", with: " ")
+            if snippetStart > 0 { snippet = "…" + snippet }
+            if snippetEnd < textLength { snippet = snippet + "…" }
+
+            results.append(SearchResult(range: found, snippet: snippet))
+
+            searchRange.location = found.location + max(found.length, 1)
+            searchRange.length = textLength - searchRange.location
+        }
+
+        searchResults = results
+        sidebarMode = .search
+        columnVisibility = .all
+
+        lastSearchQuery = query
+    }
+
+    /// Jump to a specific search result: switch to reader and select the text
+    private func jumpToSearchResult(_ result: SearchResult) {
+        // Bypass stabilization so the PDF highlight jumps immediately
+        if let coordinator = pdfViewInstance?.pageOverlayViewProvider as? PDFKitView.Coordinator {
+            coordinator.bypassStabilization = true
+        }
+
+        speechManager.stop()
+        speechManager.cursorUTF16 = result.range.location
+        speechManager.cursorLengthUTF16 = result.range.length
+
+        lastSearchResult = result.range
+
+        sidebarMode = .reader
+    }
+
+    /// Parses PAGE markers in the cleaned text to find section boundaries.
+    /// Returns [(pageNumber, sectionStartUTF16, sectionEndUTF16)].
+    private func pageRangesInCleanedText() -> [(page: Int, start: Int, end: Int)] {
+        let nsText = cleanedText as NSString
+        let pattern = "PAGE (\\d+)"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let matches = regex.matches(in: cleanedText, range: NSRange(location: 0, length: nsText.length))
+
+        var ranges: [(page: Int, start: Int, end: Int)] = []
+        for (i, match) in matches.enumerated() {
+            let pageNumRange = match.range(at: 1)
+            let pageNum = Int(nsText.substring(with: pageNumRange)) ?? 0
+            let sectionStart = match.range.location + match.range.length
+            let sectionEnd = (i + 1 < matches.count) ? matches[i + 1].range.location : nsText.length
+            ranges.append((page: pageNum, start: sectionStart, end: sectionEnd))
+        }
+        return ranges
+    }
+
+    /// Determines which PDF page the given UTF-16 offset falls in.
+    private func pageForOffset(_ offset: Int) -> Int? {
+        let pages = pageRangesInCleanedText()
+        return pages.last(where: { $0.start <= offset })?.page
+    }
+
+    // MARK: - Reader → PDF Highlighting
+
+    private func updatePDFHighlight() {
+        guard pdfDocument != nil, !cleanedText.isEmpty else { return }
+
+        let nsText = cleanedText as NSString
+        let cursor = min(speechManager.cursorUTF16, nsText.length)
+
+        // Determine which page the cursor is on from PAGE markers
+        pdfHighlightPage = pageForOffset(cursor)
+
+        // Get a context window of ~40 chars from cursor
+        let contextStart = max(0, cursor)
+        let contextEnd = min(nsText.length, cursor + 40)
+        let contextLength = contextEnd - contextStart
+
+        guard contextLength > 0 else { return }
+
+        var phrase = nsText.substring(with: NSRange(location: contextStart, length: contextLength))
+        // Trim to whole words
+        if let lastSpace = phrase.lastIndex(of: " ") {
+            phrase = String(phrase[phrase.startIndex..<lastSpace])
+        }
+        // Take first few words for a focused search
+        let words = phrase.split(separator: " ")
+        // Filter out PAGE markers from the search phrase
+        let filteredWords = words.filter { !$0.hasPrefix("PAGE") }
+        let searchPhrase = filteredWords.prefix(4).joined(separator: " ")
+
+        if !searchPhrase.isEmpty {
+            pdfHighlightText = searchPhrase
+        }
+    }
+
+    // MARK: - Cursor Jumping
+
+    private func jumpCursor(to utf16Offset: Int) {
+        // Bypass stabilization so the PDF highlight jumps immediately
+        if let coordinator = pdfViewInstance?.pageOverlayViewProvider as? PDFKitView.Coordinator {
+            coordinator.bypassStabilization = true
+        }
+
+        speechManager.stop()
+        speechManager.cursorUTF16 = utf16Offset
+        speechManager.cursorLengthUTF16 = 0
+    }
+
+    // MARK: - PDF → Reader (word selection)
+
+    /// Jumps the reader cursor to the word selected in the PDF.
+    /// Uses page number and occurrence counting for precise matching.
+    private func jumpToWord(_ word: String, fromPage pageIndex: Int, occurrence: Int) {
+        guard !cleanedText.isEmpty, !word.isEmpty else { return }
+
+        // Bypass stabilization so the PDF highlight jumps immediately
+        if let coordinator = pdfViewInstance?.pageOverlayViewProvider as? PDFKitView.Coordinator {
+            coordinator.bypassStabilization = true
+        }
+
+        let cleanedWord = TextProcessor.process(word, options: textProcessorOptions)
+        guard !cleanedWord.isEmpty else { return }
+
+        let nsText = cleanedText as NSString
+        let pages = pageRangesInCleanedText()
+
+        // Try to find the nth occurrence within the matching page section
+        if let section = pages.first(where: { $0.page == pageIndex }) {
+            let sectionEnd = section.end
+
+            var found = 0
+            var searchStart = section.start
+            while searchStart < sectionEnd {
+                let remaining = NSRange(location: searchStart, length: sectionEnd - searchStart)
+                let range = nsText.range(of: cleanedWord, options: .caseInsensitive, range: remaining)
+                if range.location == NSNotFound { break }
+                found += 1
+                if found == occurrence {
+                    jumpCursor(to: range.location)
+                    return
+                }
+                searchStart = range.location + range.length
+            }
+
+            // Fallback: first occurrence in this page section
+            let sectionRange = NSRange(location: section.start, length: sectionEnd - section.start)
+            let range = nsText.range(of: cleanedWord, options: .caseInsensitive, range: sectionRange)
+            if range.location != NSNotFound {
+                jumpCursor(to: range.location)
+                return
+            }
+        }
+
+        // Final fallback: search from current position (for non-PDF text)
+        let currentOffset = speechManager.cursorUTF16
+        let searchStart = min(currentOffset, nsText.length)
+        let forwardRange = NSRange(location: searchStart, length: nsText.length - searchStart)
+        var foundRange = nsText.range(of: cleanedWord, options: .caseInsensitive, range: forwardRange)
+
+        if foundRange.location == NSNotFound {
+            foundRange = nsText.range(of: cleanedWord, options: .caseInsensitive, range: NSRange(location: 0, length: nsText.length))
+        }
+
+        if foundRange.location != NSNotFound {
+            jumpCursor(to: foundRange.location)
+        }
+    }
+
+    // MARK: - PDF Import
+
+    private func importPDF() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.pdf]
+        panel.allowsMultipleSelection = false
+        panel.message = "Select a PDF to import"
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard let document = PDFDocument(url: url) else { return }
+
+        pdfDocument = document
+
+        cleanupGeneration += 1
+
+        // Extract text from all pages with PDFKit first (instant)
+        var pageTexts: [Int: String] = [:]
+        var flaggedPages: [Int] = []
+        let qualityThreshold = 0.05
+
+        for i in 0..<document.pageCount {
+            let pageText = document.page(at: i)?.string ?? ""
+            pageTexts[i] = pageText
+
+            // Score quality and flag bad pages for OCR
+            let score = TextProcessor.textQualityScore(pageText)
+            if score > qualityThreshold && !pageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                flaggedPages.append(i)
+            }
+        }
+
+        if flaggedPages.isEmpty {
+            // All pages are clean — assemble and display immediately
+            rawText = assembleExtractedText(document: document, pageTexts: pageTexts)
+            startBackgroundAICleanup() 
+        } else {
+            // Some pages need OCR — run async with progress
+            isImporting = true
+            importProgress = 0
+            importPageStatus = "Preparing OCR..."
+
+            Task {
+                var updatedTexts = pageTexts
+
+                for (idx, pageIndex) in flaggedPages.enumerated() {
+                    await MainActor.run {
+                        importProgress = Double(idx) / Double(flaggedPages.count)
+                        importPageStatus = "OCR page \(pageIndex + 1) of \(document.pageCount)..."
+                    }
+
+                    if let page = document.page(at: pageIndex),
+                       let ocrText = await ocrPage(page) {
+                        updatedTexts[pageIndex] = ocrText
+                    }
+                }
+
+                let finalText = assembleExtractedText(document: document, pageTexts: updatedTexts)
+
+                await MainActor.run {
+                    importProgress = 1.0
+                    importPageStatus = ""
+                    isImporting = false
+                    rawText = finalText
+                    startBackgroundAICleanup() 
+                }
+            }
+        }
+    }
+
+    /// Kicks off background AI cleanup of pages containing figure/table indicators.
+    /// Updates rawText in-place when done, which triggers reprocessing through TextProcessor.
+    private func startBackgroundAICleanup() {
+        guard removeFiguresAndTables else { return }
+
+        let model = SystemLanguageModel.default
+        guard case .available = model.availability else { return }
+
+        let currentGeneration = cleanupGeneration
+
+        // Parse rawText into per-page texts by splitting on PAGE markers
+        let pagePattern = #"--SE_NEWLINE--PAGE (\d+)--SE_NEWLINE--\n"#
+        let parts = rawText.components(separatedBy: try! NSRegularExpression(pattern: pagePattern).matches(
+            in: rawText, range: NSRange(rawText.startIndex..., in: rawText)
+        ).isEmpty ? "~~NOSPLIT~~" : "")
+
+        // Build page dictionary from rawText
+        var pageTexts: [(Int, String)] = []
+        let regex = try! NSRegularExpression(pattern: #"--SE_NEWLINE--PAGE (\d+)--SE_NEWLINE--\n"#)
+        let matches = regex.matches(in: rawText, range: NSRange(rawText.startIndex..., in: rawText))
+
+        for (i, match) in matches.enumerated() {
+            guard let numRange = Range(match.range(at: 1), in: rawText) else { continue }
+            let pageNum = Int(rawText[numRange]) ?? 0
+
+            let contentStart = rawText.index(rawText.startIndex, offsetBy: match.range.upperBound)
+            let contentEnd: String.Index
+            if i + 1 < matches.count {
+                contentEnd = rawText.index(rawText.startIndex, offsetBy: matches[i + 1].range.lowerBound)
+            } else {
+                contentEnd = rawText.endIndex
+            }
+            let pageText = String(rawText[contentStart..<contentEnd])
+            pageTexts.append((pageNum, pageText))
+        }
+
+        // Find pages with figure/table indicators
+        let figureTablePattern = #"(?i)(?:Figure\s+\d|Fig\.\s*\d|Table\s+\d|TABLE)"#
+        let flaggedIndices = pageTexts.enumerated().compactMap { (idx, entry) -> Int? in
+            entry.1.range(of: figureTablePattern, options: .regularExpression) != nil ? idx : nil
+        }
+
+        guard !flaggedIndices.isEmpty else { return }
+
+        isCleaningInBackground = true
+        backgroundCleanProgress = 0
+        backgroundCleanStatus = "Cleaning 1/\(flaggedIndices.count)..."
+
+        Task {
+            var updatedPages = pageTexts
+
+            for (step, flaggedIdx) in flaggedIndices.enumerated() {
+                // Check for cancellation (re-import happened)
+                if cleanupGeneration != currentGeneration {
+                    await MainActor.run { isCleaningInBackground = false }
+                    return
+                }
+
+                await MainActor.run {
+                    backgroundCleanProgress = Double(step) / Double(flaggedIndices.count)
+                    backgroundCleanStatus = "Cleaning \(step + 1)/\(flaggedIndices.count)..."
+                }
+
+                let cleaned = await aiCleanPage(updatedPages[flaggedIdx].1)
+                updatedPages[flaggedIdx] = (updatedPages[flaggedIdx].0, cleaned)
+            }
+
+            // Check once more before applying
+            guard cleanupGeneration == currentGeneration else {
+                await MainActor.run { isCleaningInBackground = false }
+                return
+            }
+
+            // Reassemble text with PAGE markers
+            var result = ""
+            for (pageNum, text) in updatedPages {
+                result += "--SE_NEWLINE--PAGE \(pageNum)--SE_NEWLINE--\n"
+                result += text
+            }
+
+            await MainActor.run {
+                backgroundCleanProgress = 1.0
+                backgroundCleanStatus = ""
+                isCleaningInBackground = false
+                rawText = result
+            }
+        }
+    }
+
+    /// Assembles the final extracted text with PAGE markers from per-page text.
+    private func assembleExtractedText(document: PDFDocument, pageTexts: [Int: String]) -> String {
+        var result = ""
+        for i in 0..<document.pageCount {
+            result += "--SE_NEWLINE--PAGE \(i)--SE_NEWLINE--\n"
+            if let text = pageTexts[i] {
+                result += text + "\n"
+            }
+        }
+        return result
+    }
+
+    /// Uses Apple Intelligence to strip figure captions, table data, axis labels, and other
+    /// non-prose content from a single page's extracted text. Returns the original text unchanged
+    /// if Apple Intelligence is unavailable.
+    private func aiCleanPage(_ text: String) async -> String {
+        let model = SystemLanguageModel.default
+        guard case .available = model.availability else { return text }
+
+        do {
+            let instructions = """
+                You are a text extraction assistant. You receive raw text extracted from a single page \
+                of an academic PDF. Your job is to return ONLY the body prose text. Remove: \
+                figure captions (e.g. "Figure 1: ...", "Fig. 2. ..."), \
+                table content (rows of data, column headers), \
+                table captions (e.g. "Table 1: ..."), \
+                chart axis labels and legends, \
+                and page headers and footers (journal name, page numbers, DOI). \
+                finally if there are errors in the text attempt to fix them \
+                Return the remaining prose text exactly as-is. Do not summarize, paraphrase, or add anything. \
+                If the page contains only figures/tables with no prose, return an empty string.
+                """
+            let session = LanguageModelSession(instructions: instructions)
+            let response = try await session.respond(to: text)
+            return response.content
+        } catch {
+            return text
+        }
+    }
+
+    /// Renders a PDF page to a CGImage and runs Vision OCR on it.
+    /// Returns the recognized text joined by newlines, or nil on failure.
+    private func ocrPage(_ page: PDFPage) async -> String? {
+        // Render page to image at 2x scale for good OCR quality
+        let pageRect = page.bounds(for: .mediaBox)
+        let scale: CGFloat = 2.0
+        let width = Int(pageRect.width * scale)
+        let height = Int(pageRect.height * scale)
+
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = CGContext(
+                  data: nil,
+                  width: width,
+                  height: height,
+                  bitsPerComponent: 8,
+                  bytesPerRow: 0,
+                  space: colorSpace,
+                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+              ) else {
+            return nil
+        }
+
+        ctx.setFillColor(NSColor.white.cgColor)
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        ctx.scaleBy(x: scale, y: scale)
+
+        // PDFPage.draw applies the page's own transform
+        page.draw(with: .mediaBox, to: ctx)
+
+        guard let cgImage = ctx.makeImage() else { return nil }
+
+        // Run Vision OCR
+        return await withCheckedContinuation { continuation in
+            let request = VNRecognizeTextRequest { request, error in
+                guard error == nil,
+                      let observations = request.results as? [VNRecognizedTextObservation] else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                // Sort observations top-to-bottom (Vision uses bottom-left origin, so reverse Y)
+                let sorted = observations.sorted { $0.boundingBox.origin.y > $1.boundingBox.origin.y }
+                let lines = sorted.compactMap { $0.topCandidates(1).first?.string }
+                continuation.resume(returning: lines.joined(separator: "\n"))
+            }
+            request.recognitionLevel = .accurate
+            request.usesLanguageCorrection = true
+
+            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+            do {
+                try handler.perform([request])
+            } catch {
+                continuation.resume(returning: nil)
+            }
+        }
+    }
+}
+
+#Preview {
+    ContentView()
+}
