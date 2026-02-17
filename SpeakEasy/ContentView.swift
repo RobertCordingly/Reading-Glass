@@ -666,6 +666,20 @@ struct ContentView: View {
     @State private var speakGreekLetters = true
     @State private var speakMathSymbols = true
     @State private var removeFiguresAndTables = true
+    @State private var aiCleanupPrompt = """
+        You are a text extraction assistant for a text to speech application. You receive text from a section of an academic paper. \
+        Your job is to return ONLY the body prose text. Make the changes: \
+        1. If there are errors or typos in the text fix them, \
+        2. Remove figure captions (e.g. "Figure 1: ...", "Fig. 2. ..."), \
+        3. Remove table content (rows of data, column headers), \
+        4. Remove table captions (e.g. "Table 1: ..."), \
+        5. Remove chart axis labels and legends, \
+        6. Remove page headers and footers, \
+        7. If there are garbage characters that are difficult for TTS to read remove them, \
+        8. Remove sections that do not need to be read. Such as Concept lists, Keyword lists, or Reference Formats. \
+        9. DO NOT remove page numbers, or modify white space, \
+        10. Return the remaining text exactly as-is. Do not summarize or add any additional text.
+        """
     @State private var showEditor = false
     @State private var isCleaningInBackground = false
     @State private var backgroundCleanProgress: Double = 0
@@ -881,19 +895,45 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                Toggle(isOn: $removeFiguresAndTables) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Remove Figures & Tables")
-                            .font(.system(size: 13))
-                        Text("Use Apple Intelligence to strip figure captions, table data, and axis labels")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                    }
-                }
             }
             .padding(.horizontal, 16)
             .padding(.top, 12)
             .padding(.bottom, 8)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text("AI Cleanup")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .textCase(.uppercase)
+
+                Toggle(isOn: $removeFiguresAndTables) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Enable AI Cleanup")
+                            .font(.system(size: 13))
+                        Text("Use Apple Intelligence to clean text (strip figures, tables, fix typos, etc.)")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Prompt")
+                        .font(.system(size: 13))
+                    Text("Instructions sent to the AI for each text chunk")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    TextEditor(text: $aiCleanupPrompt)
+                        .font(.system(size: 11))
+                        .frame(minHeight: 120, maxHeight: 180)
+                        .scrollContentBackground(.hidden)
+                        .padding(8)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.06)))
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
 
             Divider()
 
@@ -1959,7 +1999,7 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showOptionsEditor) {
             optionsEditorView
-                .frame(width: 350)
+                .frame(width: 420)
         }
         .sheet(isPresented: $showSummarySheet) {
             summarySheetView
@@ -1977,50 +2017,65 @@ struct ContentView: View {
 
     var body: some View {
         mainContent
-            .onChange(of: searchQuery) { _, newValue in
-                let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmed.isEmpty {
-                    lastSearchQuery = ""
-                    lastSearchResult = NSRange(location: NSNotFound, length: 0)
-                    speechManager.cursorLengthUTF16 = 0
-                } else if trimmed != lastSearchQuery {
-                    lastSearchResult = NSRange(location: NSNotFound, length: 0)
-                }
-            }
+            .onChange(of: searchQuery, handleSearchQueryChange)
             .onChange(of: ignoreReferences) { _, _ in reprocessText() }
             .onChange(of: ignoreBeforeAbstract) { _, _ in reprocessText() }
             .onChange(of: skipCitations) { _, _ in reprocessText() }
+            .onChange(of: removeFiguresAndTables, handleAICleanupToggle)
             .onChange(of: replaceParentheses) { _, _ in reprocessText() }
             .onChange(of: speakGreekLetters) { _, _ in reprocessText() }
             .onChange(of: speakMathSymbols) { _, _ in reprocessText() }
-            .onChange(of: showEditor) { _, newValue in
-                if !newValue && sidebarMode == .editor {
-                    sidebarMode = .reader
-                }
-            }
-            .onChange(of: rawText) { _, newValue in
-                let wasPlaying = speechManager.isPlaying
-                if wasPlaying { speechManager.stop() }
-                cleanedText = applyPronunciations(TextProcessor.process(newValue, options: textProcessorOptions))
-                aiCleanedChunks = [:]
-                cleanupLog = []
-                speechManager.resetCursor()
-                parseSections()
-                buildDisplayText()
-                jumpToAbstract()
-                startChunkBasedAICleanup()
-            }
-            .onChange(of: speechManager.cursorUTF16) { _, _ in
-                updatePDFHighlight()
-            }
-            .onAppear {
-                if pdfDocument == nil {
-                    importPDF()
-                }
-            }
-            .onDisappear {
-                speechManager.stop()
-            }
+            .onChange(of: showEditor, handleShowEditorChange)
+            .onChange(of: rawText, handleRawTextChange)
+            .onChange(of: speechManager.cursorUTF16) { _, _ in updatePDFHighlight() }
+            .onAppear(perform: handleOnAppear)
+            .onDisappear { speechManager.stop() }
+    }
+
+    private func handleSearchQueryChange(_: String, newValue: String) {
+        let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            lastSearchQuery = ""
+            lastSearchResult = NSRange(location: NSNotFound, length: 0)
+            speechManager.cursorLengthUTF16 = 0
+        } else if trimmed != lastSearchQuery {
+            lastSearchResult = NSRange(location: NSNotFound, length: 0)
+        }
+    }
+
+    private func handleAICleanupToggle(_: Bool, enabled: Bool) {
+        if enabled {
+            startChunkBasedAICleanup()
+        } else {
+            aiCleanedChunks = [:]
+            cleanupLog = []
+            buildDisplayText()
+        }
+    }
+
+    private func handleShowEditorChange(_: Bool, newValue: Bool) {
+        if !newValue && sidebarMode == .editor {
+            sidebarMode = .reader
+        }
+    }
+
+    private func handleRawTextChange(_: String, newValue: String) {
+        let wasPlaying = speechManager.isPlaying
+        if wasPlaying { speechManager.stop() }
+        cleanedText = applyPronunciations(TextProcessor.process(newValue, options: textProcessorOptions))
+        aiCleanedChunks = [:]
+        cleanupLog = []
+        speechManager.resetCursor()
+        parseSections()
+        buildDisplayText()
+        jumpToAbstract()
+        startChunkBasedAICleanup()
+    }
+
+    private func handleOnAppear() {
+        if pdfDocument == nil {
+            importPDF()
+        }
     }
 
     // MARK: - Sidebar Management
@@ -2440,28 +2495,15 @@ struct ContentView: View {
         }
     }
 
-    /// Uses Apple Intelligence to strip figure captions, table data, and other non-prose content.
+    /// Uses Apple Intelligence to clean text according to the user-configurable prompt.
     private func aiCleanSection(_ text: String) async -> String {
         let model = SystemLanguageModel.default
         guard case .available = model.availability else { return text }
         guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { return text }
 
         do {
-            let instructions = """
-                You are a text extraction assistant for a text to speech application. You receive text from a section of an academic paper. \
-                Your job is to return ONLY the body prose text. Make the changes: \
-                1. If there are errors or typos in the text fix them, \
-                2. Remove figure captions (e.g. "Figure 1: ...", "Fig. 2. ..."), \
-                3. Remove table content (rows of data, column headers), \
-                4. Remove table captions (e.g. "Table 1: ..."), \
-                5. Remove chart axis labels and legends, \
-                6. Remove page headers and footers, \
-                7. If there are garbage characters that are difficult for TTS to read remove them, \
-                8. Remove sections that do not need to be read. Such as Concept lists, Keyword lists, or Reference Formats. \
-                9. DO NOT remove page numbers, or modify white space, \
-                10. Return the remaining text exactly as-is. Do not summarize or add any additional text.
-                """
-            let session = LanguageModelSession(instructions: instructions)
+            let instructions = aiCleanupPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+            let session = LanguageModelSession(instructions: instructions.isEmpty ? "Return the text unchanged." : instructions)
             let response = try await session.respond(to: text)
             return response.content
         } catch {
