@@ -466,8 +466,8 @@ struct SearchResult: Identifiable {
 }
 
 /// A pronunciation mapping: find text and replace with spoken form.
-struct PronunciationEntry: Identifiable {
-    let id = UUID()
+struct PronunciationEntry: Identifiable, Codable {
+    var id = UUID()
     var find: String
     var replace: String
 }
@@ -650,8 +650,6 @@ struct ContentView: View {
     @State private var sidebarMode: SidebarMode = .reader
     @State private var columnVisibility: NavigationSplitViewVisibility = .automatic
 
-    @State private var speedMultiplier: Double = 2.0 // 0.5 to 4.0
-
     @State private var searchQuery: String = ""
     @State private var lastSearchQuery: String = ""
     @State private var lastSearchResult: NSRange = NSRange(location: NSNotFound, length: 0)
@@ -659,14 +657,14 @@ struct ContentView: View {
     @State private var parsedSections: [SectionItem] = []
     @State private var showPronunciationEditor = false
     @State private var showOptionsEditor = false
-    @State private var ignoreReferences = true
-    @State private var ignoreBeforeAbstract = true
-    @State private var skipCitations = true
-    @State private var replaceParentheses = true
-    @State private var speakGreekLetters = true
-    @State private var speakMathSymbols = true
-    @State private var removeFiguresAndTables = true
-    @State private var aiCleanupPrompt = """
+    @AppStorage("ignoreReferences") private var ignoreReferences = true
+    @AppStorage("ignoreBeforeAbstract") private var ignoreBeforeAbstract = true
+    @AppStorage("skipCitations") private var skipCitations = true
+    @AppStorage("replaceParentheses") private var replaceParentheses = true
+    @AppStorage("speakGreekLetters") private var speakGreekLetters = true
+    @AppStorage("speakMathSymbols") private var speakMathSymbols = true
+    @AppStorage("removeFiguresAndTables") private var removeFiguresAndTables = false
+    @AppStorage("aiCleanupPrompt") private var aiCleanupPrompt = """
         You are a text extraction assistant for a text to speech application. You receive text from a section of an academic paper. \
         Your job is to return ONLY the body prose text. Make the changes: \
         1. If there are errors or typos in the text fix them, \
@@ -680,7 +678,8 @@ struct ContentView: View {
         9. DO NOT remove page numbers, or modify white space, \
         10. Return the remaining text exactly as-is. Do not summarize or add any additional text.
         """
-    @State private var showEditor = false
+    @AppStorage("showEditor") private var showEditor = false
+    @AppStorage("speedMultiplier") private var speedMultiplier = 2.0
     @State private var isCleaningInBackground = false
     @State private var backgroundCleanProgress: Double = 0
     @State private var backgroundCleanStatus = ""
@@ -691,7 +690,9 @@ struct ContentView: View {
     @State private var summaryText = ""
     @State private var isSummarizing = false
     @State private var summaryError = ""
-    @State private var pronunciations: [PronunciationEntry] = [
+    @State private var pronunciations: [PronunciationEntry] = Self.loadPronunciations()
+
+    private static let defaultPronunciations: [PronunciationEntry] = [
         PronunciationEntry(find: "vCPU", replace: "virtual CPU"),
         PronunciationEntry(find: "e.g.", replace: "for example"),
         PronunciationEntry(find: "i.e.", replace: "that is"),
@@ -703,6 +704,19 @@ struct ContentView: View {
         PronunciationEntry(find: " \"rst ", replace: " first "),
         PronunciationEntry(find: " #oating ", replace: " floating "),
     ]
+
+    private static func loadPronunciations() -> [PronunciationEntry] {
+        guard let data = UserDefaults.standard.data(forKey: "pronunciations"),
+              let decoded = try? JSONDecoder().decode([PronunciationEntry].self, from: data) else {
+            return defaultPronunciations
+        }
+        return decoded
+    }
+
+    private static func savePronunciations(_ entries: [PronunciationEntry]) {
+        guard let data = try? JSONEncoder().encode(entries) else { return }
+        UserDefaults.standard.set(data, forKey: "pronunciations")
+    }
 
     /// Search results sidebar view
     /// Pronunciation editor popover
@@ -769,11 +783,13 @@ struct ContentView: View {
 
             HStack {
                 Button("Close") {
+                    Self.savePronunciations(pronunciations)
                     showPronunciationEditor = false
                 }
                 .keyboardShortcut(.cancelAction)
                 Spacer()
                 Button("Apply Now") {
+                    Self.savePronunciations(pronunciations)
                     reprocessText()
                     showPronunciationEditor = false
                 }
@@ -798,15 +814,23 @@ struct ContentView: View {
             .padding(.bottom, 4)
 
             if isCleaningInBackground {
-                HStack(spacing: 6) {
+                HStack(spacing: 8) {
                     ProgressView(value: backgroundCleanProgress)
                         .progressViewStyle(.linear)
                         .frame(width: 120)
+                        .padding(.horizontal, 12)
                     Text(backgroundCleanStatus)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    Button(action: stopCleanup) {
+                        Image(systemName: "stop.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Stop AI cleanup")
                 }
-                .padding(.horizontal, 16)
+                .padding(.horizontal, 20)
                 .padding(.bottom, 8)
             }
 
@@ -1181,7 +1205,6 @@ struct ContentView: View {
         cleanupLog = []
         parseSections()
         buildDisplayText()
-        startChunkBasedAICleanup()
         if wasPlaying {
             speechManager.play(text: displayText)
         }
@@ -1930,69 +1953,114 @@ struct ContentView: View {
         } detail: {
             detailView
         }
-        .toolbar {
-            ToolbarItemGroup(placement: .navigation) {
+        .toolbar(id: "mainToolbarTest4") {
+            
+            // Group 1: Load PDF
+            ToolbarItem(id: "load", placement: .automatic) {
                 Button(action: importPDF) {
                     Label("Load", systemImage: "doc.fill")
                 }
                 .help("Load PDF")
-
+            }
+            
+            // Group 4: Pronunciation
+            ToolbarItem(id: "pronunciation", placement: .automatic) {
                 Button(action: { showPronunciationEditor = true }) {
                     Label("Pronounce", systemImage: "text.word.spacing")
                 }
                 .help("Edit pronunciation replacements")
-
+            }
+            
+            // Group 5: Settings
+            ToolbarItem(id: "settings", placement: .automatic) {
                 Button(action: { showOptionsEditor = true }) {
                     Label("Options", systemImage: "gearshape")
                 }
                 .help("Reader options")
-
-                Button(action: { summarizeCurrentSection() }) {
-                    Label("Summarize", systemImage: "apple.intelligence")
-                }
-                .help("Summarize current section with Apple Intelligence")
-                .disabled(displayText.isEmpty)
             }
 
-            ToolbarItem(placement: .navigation) {
-                if isCleaningInBackground || !cleanupLog.isEmpty {
-                    Button(action: { showCleanupLogSheet = true }) {
-                        if isCleaningInBackground {
-                            HStack(spacing: 6) {
-                                ProgressView(value: backgroundCleanProgress)
-                                    .progressViewStyle(.linear)
-                                    .frame(width: 60)
-                                Text(backgroundCleanStatus)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        } else {
-                            Label("Cleanup", systemImage: "sparkles")
-                                .overlay(alignment: .topTrailing) {
-                                    if !cleanupLog.isEmpty {
-                                        Text("\(cleanupLog.count)")
-                                            .font(.system(size: 9))
-                                            .padding(2)
-                                            .background(Capsule().fill(Color.accentColor))
-                                            .foregroundStyle(.white)
-                                            .offset(x: 6, y: -6)
-                                    }
-                                }
-                        }
+            // Group 2: AI tools
+            ToolbarItem(id: "ai", placement: .automatic) {
+                HStack(spacing: 6) {
+                    Button(action: { summarizeCurrentSection() }) {
+                        Label("AI Summary", systemImage: "apple.intelligence")
                     }
-                    .help(isCleaningInBackground ? "AI is removing figures and tables" : "View cleanup log")
+                    .help("Summarize current section with Apple Intelligence")
+                    .disabled(displayText.isEmpty)
+
+                    if isCleaningInBackground {
+                        Button(action: stopCleanup) {
+                            Label("Stop Cleanup", systemImage: "stop.fill")
+                        }
+                        .help("Stop AI cleanup")
+                    } else {
+                        Button(action: { startChunkBasedAICleanup() }) {
+                            Label("AI Cleanup", systemImage: "sparkles")
+                        }
+                        .disabled(!removeFiguresAndTables || cleanedText.isEmpty)
+                        .help(removeFiguresAndTables ? "Run AI cleanup on the text" : "Enable AI Cleanup in Options first")
+                    }
+
+                    ProgressView(value: backgroundCleanProgress)
+                        .progressViewStyle(.linear)
+                        .frame(width: 60)
+                        .opacity(isCleaningInBackground ? 1.0 : 0.3)
+
+                    Button(action: { showCleanupLogSheet = true }) {
+                        Label("AI Log", systemImage: "list.bullet.rectangle")
+                            .overlay(alignment: .topTrailing) {
+                                if !cleanupLog.isEmpty {
+                                    Text("\(cleanupLog.count)")
+                                        .font(.system(size: 9))
+                                        .padding(2)
+                                        .background(Capsule().fill(Color.accentColor))
+                                        .foregroundStyle(.white)
+                                        .offset(x: 6, y: -6)
+                                }
+                            }
+                    }
+                    .help(cleanupLog.isEmpty ? "View AI cleanup log (no entries yet)" : "View AI cleanup log (\(cleanupLog.count) entries)")
                 }
             }
 
-            ToolbarItemGroup(placement: .primaryAction) {
-                Spacer()
+            ToolbarSpacer(.flexible, placement: .automatic)
+            
+            // Group 3: PDF Zoom controls
+            ToolbarItem(id: "zoom", placement: .automatic) {
+                HStack(spacing: 2) {
+                    Button(action: { pdfViewInstance?.zoomOut(nil) }) {
+                        Label("Zoom Out", systemImage: "minus.magnifyingglass")
+                    }
+                    .help("Zoom out PDF")
+                    .disabled(pdfViewInstance == nil || !(pdfViewInstance?.canZoomOut ?? false))
 
+                    Button(action: {
+                        pdfViewInstance?.autoScales = true
+                    }) {
+                        Label("Actual Size", systemImage: "1.magnifyingglass")
+                    }
+                    .help("Reset PDF zoom to fit")
+                    .disabled(pdfViewInstance == nil)
+
+                    Button(action: { pdfViewInstance?.zoomIn(nil) }) {
+                        Label("Zoom In", systemImage: "plus.magnifyingglass")
+                    }
+                    .help("Zoom in PDF")
+                    .disabled(pdfViewInstance == nil || !(pdfViewInstance?.canZoomIn ?? false))
+                }
+            }
+            
+            ToolbarSpacer(.fixed, placement: .automatic)
+            
+            // Group 6: Search
+            ToolbarItem(id: "search", placement: .automatic) {
                 ToolbarSearchField(text: $searchQuery, prompt: "Search") {
                     performSearch()
                 }
-                .frame(width: 260)
+                .frame(width: 200)
             }
         }
+        //.toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         .sheet(isPresented: $showPronunciationEditor) {
             pronunciationEditorView
                 .frame(width: 450)
@@ -2044,9 +2112,7 @@ struct ContentView: View {
     }
 
     private func handleAICleanupToggle(_: Bool, enabled: Bool) {
-        if enabled {
-            startChunkBasedAICleanup()
-        } else {
+        if !enabled {
             aiCleanedChunks = [:]
             cleanupLog = []
             buildDisplayText()
@@ -2069,7 +2135,6 @@ struct ContentView: View {
         parseSections()
         buildDisplayText()
         jumpToAbstract()
-        startChunkBasedAICleanup()
     }
 
     private func handleOnAppear() {
@@ -2413,6 +2478,10 @@ struct ContentView: View {
 
     /// Kicks off background AI cleanup of 500-char chunks (from cleanedText) containing figure/table indicators.
     /// Updates displayText incrementally as each chunk is cleaned. Changelog entries are labeled by section name.
+    private func stopCleanup() {
+        cleanupGeneration += 1
+    }
+
     private func startChunkBasedAICleanup() {
         guard removeFiguresAndTables else { return }
 

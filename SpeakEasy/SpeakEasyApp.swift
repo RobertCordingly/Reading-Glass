@@ -6,6 +6,11 @@ extension Notification.Name {
 
 @main
 struct SpeakEasyApp: App {
+    init() {
+        // Clear stale toolbar customization from previous versions
+        UserDefaults.standard.removeObject(forKey: "NSToolbar Configuration main")
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()
