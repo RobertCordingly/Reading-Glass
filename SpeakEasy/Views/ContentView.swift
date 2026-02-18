@@ -441,7 +441,6 @@ struct ContentView: View {
         }
         .toolbar(id: "mainToolbarTest4") {
             
-            // Group 1: Load PDF
             ToolbarItem(id: "load", placement: .automatic) {
                 Button(action: importPDF) {
                     Label("Load", systemImage: "doc.fill")
@@ -449,7 +448,6 @@ struct ContentView: View {
                 .help("Load PDF")
             }
             
-            // Group 4: Pronunciation
             ToolbarItem(id: "pronunciation", placement: .automatic) {
                 Button(action: { showPronunciationEditor = true }) {
                     Label("Pronounce", systemImage: "text.word.spacing")
@@ -457,15 +455,13 @@ struct ContentView: View {
                 .help("Edit pronunciation replacements")
             }
             
-            // Group 5: Settings
             ToolbarItem(id: "settings", placement: .automatic) {
                 Button(action: { showOptionsEditor = true }) {
                     Label("Options", systemImage: "gearshape")
                 }
                 .help("Reader options")
             }
-
-            // Group 2: AI tools
+            
             ToolbarItem(id: "ai", placement: .automatic) {
                 HStack(spacing: 6) {
                     Button(action: { summarizeCurrentSection() }) {
@@ -473,7 +469,6 @@ struct ContentView: View {
                     }
                     .help("Summarize current section with Apple Intelligence")
                     .disabled(displayText.isEmpty)
-
                     if isCleaningInBackground {
                         Button(action: stopCleanup) {
                             Label("Stop Cleanup", systemImage: "stop.fill")
@@ -486,12 +481,10 @@ struct ContentView: View {
                         .disabled(!removeFiguresAndTables || cleanedText.isEmpty)
                         .help(removeFiguresAndTables ? "Run AI cleanup on the text" : "Enable AI Cleanup in Options first")
                     }
-
                     ProgressView(value: backgroundCleanProgress)
                         .progressViewStyle(.linear)
                         .frame(width: 60)
                         .opacity(isCleaningInBackground ? 1.0 : 0.3)
-
                     Button(action: { showCleanupLogSheet = true }) {
                         Label("AI Log", systemImage: "list.bullet.rectangle")
                             .overlay(alignment: .topTrailing) {
@@ -508,10 +501,9 @@ struct ContentView: View {
                     .help(cleanupLog.isEmpty ? "View AI cleanup log (no entries yet)" : "View AI cleanup log (\(cleanupLog.count) entries)")
                 }
             }
-
+            
             ToolbarSpacer(.flexible, placement: .automatic)
             
-            // Group 3: PDF Zoom controls
             ToolbarItem(id: "zoom", placement: .automatic) {
                 HStack(spacing: 2) {
                     Button(action: { pdfViewInstance?.zoomOut(nil) }) {
@@ -519,15 +511,11 @@ struct ContentView: View {
                     }
                     .help("Zoom out PDF")
                     .disabled(pdfViewInstance == nil || !(pdfViewInstance?.canZoomOut ?? false))
-
-                    Button(action: {
-                        pdfViewInstance?.autoScales = true
-                    }) {
+                    Button(action: { pdfViewInstance?.autoScales = true }) {
                         Label("Actual Size", systemImage: "1.magnifyingglass")
                     }
                     .help("Reset PDF zoom to fit")
                     .disabled(pdfViewInstance == nil)
-
                     Button(action: { pdfViewInstance?.zoomIn(nil) }) {
                         Label("Zoom In", systemImage: "plus.magnifyingglass")
                     }
@@ -538,7 +526,6 @@ struct ContentView: View {
             
             ToolbarSpacer(.fixed, placement: .automatic)
             
-            // Group 6: Search
             ToolbarItem(id: "search", placement: .automatic) {
                 ToolbarSearchField(text: $searchQuery, prompt: "Search") {
                     performSearch()
@@ -546,7 +533,6 @@ struct ContentView: View {
                 .frame(width: 200)
             }
         }
-        //.toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         .sheet(isPresented: $showPronunciationEditor) {
             PronunciationEditorView(
                 pronunciations: $pronunciations,
