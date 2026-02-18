@@ -14,6 +14,16 @@
 		AA000005 /* ReaderTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000015 /* ReaderTextView.swift */; };
 		AA000006 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AA000016 /* Assets.xcassets */; };
 		AA000007 /* PlaybackPillView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000017 /* PlaybackPillView.swift */; };
+		AA000008 /* EditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000018 /* EditorView.swift */; };
+		AA000009 /* SectionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000019 /* SectionsView.swift */; };
+		AA0000A1 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000A2 /* Models.swift */; };
+		AA0000A3 /* SectionParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000A4 /* SectionParser.swift */; };
+		AA0000A5 /* SearchResultsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000A6 /* SearchResultsView.swift */; };
+		AA0000A7 /* CleanupLogView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000A8 /* CleanupLogView.swift */; };
+		AA0000A9 /* OptionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000AA /* OptionsView.swift */; };
+		AA0000AB /* PronunciationEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000AC /* PronunciationEditorView.swift */; };
+		AA0000AD /* SummarySheetView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000AE /* SummarySheetView.swift */; };
+		AA0000AF /* PDFComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000B0 /* PDFComponents.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -25,6 +35,16 @@
 		AA000015 /* ReaderTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderTextView.swift; sourceTree = "<group>"; };
 		AA000016 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		AA000017 /* PlaybackPillView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackPillView.swift; sourceTree = "<group>"; };
+		AA000018 /* EditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorView.swift; sourceTree = "<group>"; };
+		AA000019 /* SectionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SectionsView.swift; sourceTree = "<group>"; };
+		AA0000A2 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		AA0000A4 /* SectionParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SectionParser.swift; sourceTree = "<group>"; };
+		AA0000A6 /* SearchResultsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchResultsView.swift; sourceTree = "<group>"; };
+		AA0000A8 /* CleanupLogView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CleanupLogView.swift; sourceTree = "<group>"; };
+		AA0000AA /* OptionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OptionsView.swift; sourceTree = "<group>"; };
+		AA0000AC /* PronunciationEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PronunciationEditorView.swift; sourceTree = "<group>"; };
+		AA0000AE /* SummarySheetView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SummarySheetView.swift; sourceTree = "<group>"; };
+		AA0000B0 /* PDFComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFComponents.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -55,6 +75,16 @@
 				AA000014 /* TextProcessor.swift */,
 				AA000015 /* ReaderTextView.swift */,
 				AA000017 /* PlaybackPillView.swift */,
+				AA000018 /* EditorView.swift */,
+				AA000019 /* SectionsView.swift */,
+				AA0000A2 /* Models.swift */,
+				AA0000A4 /* SectionParser.swift */,
+				AA0000A6 /* SearchResultsView.swift */,
+				AA0000A8 /* CleanupLogView.swift */,
+				AA0000AA /* OptionsView.swift */,
+				AA0000AC /* PronunciationEditorView.swift */,
+				AA0000AE /* SummarySheetView.swift */,
+				AA0000B0 /* PDFComponents.swift */,
 				AA000016 /* Assets.xcassets */,
 			);
 			path = SpeakEasy;
@@ -138,6 +168,16 @@
 				AA000004 /* TextProcessor.swift in Sources */,
 				AA000005 /* ReaderTextView.swift in Sources */,
 				AA000007 /* PlaybackPillView.swift in Sources */,
+				AA000008 /* EditorView.swift in Sources */,
+				AA000009 /* SectionsView.swift in Sources */,
+				AA0000A1 /* Models.swift in Sources */,
+				AA0000A3 /* SectionParser.swift in Sources */,
+				AA0000A5 /* SearchResultsView.swift in Sources */,
+				AA0000A7 /* CleanupLogView.swift in Sources */,
+				AA0000A9 /* OptionsView.swift in Sources */,
+				AA0000AB /* PronunciationEditorView.swift in Sources */,
+				AA0000AD /* SummarySheetView.swift in Sources */,
+				AA0000AF /* PDFComponents.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
