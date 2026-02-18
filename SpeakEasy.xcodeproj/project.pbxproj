@@ -24,6 +24,8 @@
 		AA0000AB /* PronunciationEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000AC /* PronunciationEditorView.swift */; };
 		AA0000AD /* SummarySheetView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000AE /* SummarySheetView.swift */; };
 		AA0000AF /* PDFComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000B0 /* PDFComponents.swift */; };
+		AA0000B1 /* PDFImportProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000B2 /* PDFImportProcessor.swift */; };
+		AA0000B3 /* AICleanupManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000B4 /* AICleanupManager.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -45,6 +47,8 @@
 		AA0000AC /* PronunciationEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PronunciationEditorView.swift; sourceTree = "<group>"; };
 		AA0000AE /* SummarySheetView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SummarySheetView.swift; sourceTree = "<group>"; };
 		AA0000B0 /* PDFComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFComponents.swift; sourceTree = "<group>"; };
+		AA0000B2 /* PDFImportProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFImportProcessor.swift; sourceTree = "<group>"; };
+		AA0000B4 /* AICleanupManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AICleanupManager.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -112,6 +116,7 @@
 			isa = PBXGroup;
 			children = (
 				AA000013 /* SpeechManager.swift */,
+				AA0000B4 /* AICleanupManager.swift */,
 			);
 			path = Managers;
 			sourceTree = "<group>";
@@ -120,6 +125,7 @@
 			isa = PBXGroup;
 			children = (
 				AA000014 /* TextProcessor.swift */,
+				AA0000B2 /* PDFImportProcessor.swift */,
 			);
 			path = Processing;
 			sourceTree = "<group>";
@@ -234,6 +240,8 @@
 				AA0000AB /* PronunciationEditorView.swift in Sources */,
 				AA0000AD /* SummarySheetView.swift in Sources */,
 				AA0000AF /* PDFComponents.swift in Sources */,
+				AA0000B1 /* PDFImportProcessor.swift in Sources */,
+				AA0000B3 /* AICleanupManager.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

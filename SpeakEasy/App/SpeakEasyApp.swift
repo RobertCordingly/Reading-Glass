@@ -8,14 +8,16 @@ extension Notification.Name {
 struct SpeakEasyApp: App {
     init() {
         // Clear stale toolbar customization from previous versions
-        UserDefaults.standard.removeObject(forKey: "NSToolbar Configuration main")
+        for key in UserDefaults.standard.dictionaryRepresentation().keys where key.hasPrefix("NSToolbar Configuration") {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
     }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
         }
-        .windowStyle(.hiddenTitleBar)
+        .windowToolbarStyle(.unified(showsTitle: false))
         .defaultSize(width: 700, height: 500)
         .commands {
             CommandGroup(after: .windowList) {

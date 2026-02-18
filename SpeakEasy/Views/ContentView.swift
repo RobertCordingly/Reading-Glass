@@ -1,14 +1,13 @@
 import PDFKit
 import AppKit
 import SwiftUI
-import FoundationModels
 
 struct ContentView: View {
     @StateObject private var speechManager = SpeechManager()
+    @StateObject private var aiCleanupManager = AICleanupManager()
     @State private var rawText = ""
     @State private var cleanedText = ""
     @State private var displayText = ""
-    @State private var aiCleanedChunks: [Int: String] = [:]
     @State private var displaySectionOffsets: [Int] = []
     @State private var pdfDocument: PDFDocument?
     @State private var pdfHighlightText = ""
@@ -47,12 +46,7 @@ struct ContentView: View {
         """
     @AppStorage("showEditor") private var showEditor = false
     @AppStorage("speedMultiplier") private var speedMultiplier = 2.0
-    @State private var isCleaningInBackground = false
-    @State private var backgroundCleanProgress: Double = 0
-    @State private var backgroundCleanStatus = ""
-    @State private var cleanupLog: [CleanupLogEntry] = []
     @State private var showCleanupLogSheet = false
-    @State private var cleanupGeneration = 0
     @State private var showSummarySheet = false
     @State private var summaryText = ""
     @State private var isSummarizing = false
@@ -101,33 +95,6 @@ struct ContentView: View {
 
     /// Summarize the current section using Apple Intelligence
     private func summarizeCurrentSection() {
-        let model = SystemLanguageModel.default
-
-        switch model.availability {
-        case .available:
-            break
-        case .unavailable(.deviceNotEligible):
-            summaryError = "Apple Intelligence is not available on this device."
-            summaryText = ""
-            showSummarySheet = true
-            return
-        case .unavailable(.appleIntelligenceNotEnabled):
-            summaryError = "Apple Intelligence is available but not enabled. Enable it in System Settings."
-            summaryText = ""
-            showSummarySheet = true
-            return
-        case .unavailable(.modelNotReady):
-            summaryError = "The language model isn't ready yet. Please try again later."
-            summaryText = ""
-            showSummarySheet = true
-            return
-        case .unavailable:
-            summaryError = "Apple Intelligence is unavailable."
-            summaryText = ""
-            showSummarySheet = true
-            return
-        }
-
         let sectionText = currentSectionText()
         guard !sectionText.isEmpty else { return }
 
@@ -138,21 +105,14 @@ struct ContentView: View {
 
         Task {
             do {
-                let instructions = """
-                    You are a helpful research assistant. Provide a concise and comprehensive \
-                    summary of the given text. Capture the main points and convey the author's \
-                    intended meaning accurately. Do not add any information not in the original \
-                    text. Keep the summary focused and appropriately brief.
-                    """
-                let session = LanguageModelSession(instructions: instructions)
-                let response = try await session.respond(to: sectionText)
+                let result = try await aiCleanupManager.summarize(text: sectionText)
                 await MainActor.run {
-                    summaryText = response.content
+                    summaryText = result
                     isSummarizing = false
                 }
             } catch {
                 await MainActor.run {
-                    summaryError = "Summarization failed: \(error.localizedDescription)"
+                    summaryError = (error as? AICleanupError)?.errorDescription ?? "Summarization failed: \(error.localizedDescription)"
                     isSummarizing = false
                 }
             }
@@ -176,8 +136,7 @@ struct ContentView: View {
             speechManager.stop()
         }
         cleanedText = applyPronunciations(TextProcessor.process(rawText, options: textProcessorOptions))
-        aiCleanedChunks = [:]
-        cleanupLog = []
+        aiCleanupManager.clear()
         parsedSections = SectionParser.parse(text: cleanedText)
         buildDisplayText()
         if wasPlaying {
@@ -438,100 +397,103 @@ struct ContentView: View {
             sidebarView
         } detail: {
             detailView
-        }
-        .toolbar(id: "mainToolbarTest4") {
-            
-            ToolbarItem(id: "load", placement: .automatic) {
-                Button(action: importPDF) {
-                    Label("Load", systemImage: "doc.fill")
-                }
-                .help("Load PDF")
-            }
-            
-            ToolbarItem(id: "pronunciation", placement: .automatic) {
-                Button(action: { showPronunciationEditor = true }) {
-                    Label("Pronounce", systemImage: "text.word.spacing")
-                }
-                .help("Edit pronunciation replacements")
-            }
-            
-            ToolbarItem(id: "settings", placement: .automatic) {
-                Button(action: { showOptionsEditor = true }) {
-                    Label("Options", systemImage: "gearshape")
-                }
-                .help("Reader options")
-            }
-            
-            ToolbarItem(id: "ai", placement: .automatic) {
-                HStack(spacing: 6) {
-                    Button(action: { summarizeCurrentSection() }) {
-                        Label("AI Summary", systemImage: "apple.intelligence")
-                    }
-                    .help("Summarize current section with Apple Intelligence")
-                    .disabled(displayText.isEmpty)
-                    if isCleaningInBackground {
-                        Button(action: stopCleanup) {
-                            Label("Stop Cleanup", systemImage: "stop.fill")
+                .toolbar(id: "mainToolbar7") {
+                    ToolbarItem(id: "load", placement: .automatic) {
+                        Button(action: importPDF) {
+                            Label("Load", systemImage: "doc.fill")
                         }
-                        .help("Stop AI cleanup")
-                    } else {
-                        Button(action: { startChunkBasedAICleanup() }) {
-                            Label("AI Cleanup", systemImage: "sparkles")
-                        }
-                        .disabled(!removeFiguresAndTables || cleanedText.isEmpty)
-                        .help(removeFiguresAndTables ? "Run AI cleanup on the text" : "Enable AI Cleanup in Options first")
+                        .help("Load PDF")
                     }
-                    ProgressView(value: backgroundCleanProgress)
-                        .progressViewStyle(.linear)
-                        .frame(width: 60)
-                        .opacity(isCleaningInBackground ? 1.0 : 0.3)
-                    Button(action: { showCleanupLogSheet = true }) {
-                        Label("AI Log", systemImage: "list.bullet.rectangle")
-                            .overlay(alignment: .topTrailing) {
-                                if !cleanupLog.isEmpty {
-                                    Text("\(cleanupLog.count)")
-                                        .font(.system(size: 9))
-                                        .padding(2)
-                                        .background(Capsule().fill(Color.accentColor))
-                                        .foregroundStyle(.white)
-                                        .offset(x: 6, y: -6)
-                                }
+                    
+                    ToolbarSpacer(.fixed, placement: .automatic)
+
+                    ToolbarItem(id: "pronunciation", placement: .automatic) {
+                        Button(action: { showPronunciationEditor = true }) {
+                            Label("Pronounce", systemImage: "text.word.spacing")
+                        }
+                        .help("Edit pronunciation replacements")
+                    }
+
+                    ToolbarItem(id: "settings", placement: .automatic) {
+                        Button(action: { showOptionsEditor = true }) {
+                            Label("Options", systemImage: "gearshape")
+                        }
+                        .help("Reader options")
+                    }
+
+                    ToolbarSpacer(.flexible, placement: .automatic)
+
+                    ToolbarItem(id: "ai", placement: .automatic) {
+                        HStack(spacing: 6) {
+                            Button(action: { summarizeCurrentSection() }) {
+                                Label("AI Summary", systemImage: "apple.intelligence")
                             }
+                            .help("Summarize current section with Apple Intelligence")
+                            .disabled(displayText.isEmpty)
+                            if aiCleanupManager.isCleaningInBackground {
+                                Button(action: { aiCleanupManager.stopCleanup() }) {
+                                    Label("Stop Cleanup", systemImage: "stop.fill")
+                                }
+                                .help("Stop AI cleanup")
+                            } else {
+                                Button(action: startChunkBasedAICleanup) {
+                                    Label("AI Cleanup", systemImage: "sparkles")
+                                }
+                                .disabled(!removeFiguresAndTables || cleanedText.isEmpty)
+                                .help(removeFiguresAndTables ? "Run AI cleanup on the text" : "Enable AI Cleanup in Options first")
+                            }
+                            ProgressView(value: aiCleanupManager.backgroundCleanProgress)
+                                .progressViewStyle(.linear)
+                                .frame(width: 60)
+                                .opacity(aiCleanupManager.isCleaningInBackground ? 1.0 : 0.3)
+                            Button(action: { showCleanupLogSheet = true }) {
+                                Label("AI Log", systemImage: "list.bullet.rectangle")
+                                    .overlay(alignment: .topTrailing) {
+                                        if !aiCleanupManager.cleanupLog.isEmpty {
+                                            Text("\(aiCleanupManager.cleanupLog.count)")
+                                                .font(.system(size: 9))
+                                                .padding(2)
+                                                .background(Capsule().fill(Color.accentColor))
+                                                .foregroundStyle(.white)
+                                                .offset(x: 6, y: -6)
+                                        }
+                                    }
+                            }
+                            .help(aiCleanupManager.cleanupLog.isEmpty ? "View AI cleanup log (no entries yet)" : "View AI cleanup log (\(aiCleanupManager.cleanupLog.count) entries)")
+                        }
                     }
-                    .help(cleanupLog.isEmpty ? "View AI cleanup log (no entries yet)" : "View AI cleanup log (\(cleanupLog.count) entries)")
+
+                    ToolbarSpacer(.flexible, placement: .automatic)
+
+                    ToolbarItem(id: "zoom", placement: .automatic) {
+                        HStack(spacing: 2) {
+                            Button(action: { pdfViewInstance?.zoomOut(nil) }) {
+                                Label("Zoom Out", systemImage: "minus.magnifyingglass")
+                            }
+                            .help("Zoom out PDF")
+                            .disabled(pdfViewInstance == nil || !(pdfViewInstance?.canZoomOut ?? false))
+                            Button(action: { pdfViewInstance?.autoScales = true }) {
+                                Label("Actual Size", systemImage: "1.magnifyingglass")
+                            }
+                            .help("Reset PDF zoom to fit")
+                            .disabled(pdfViewInstance == nil)
+                            Button(action: { pdfViewInstance?.zoomIn(nil) }) {
+                                Label("Zoom In", systemImage: "plus.magnifyingglass")
+                            }
+                            .help("Zoom in PDF")
+                            .disabled(pdfViewInstance == nil || !(pdfViewInstance?.canZoomIn ?? false))
+                        }
+                    }
+
+                    ToolbarSpacer(.fixed, placement: .automatic)
+
+                    ToolbarItem(id: "search", placement: .automatic) {
+                        ToolbarSearchField(text: $searchQuery, prompt: "Search") {
+                            performSearch()
+                        }
+                        .frame(width: 200)
+                    }
                 }
-            }
-            
-            ToolbarSpacer(.flexible, placement: .automatic)
-            
-            ToolbarItem(id: "zoom", placement: .automatic) {
-                HStack(spacing: 2) {
-                    Button(action: { pdfViewInstance?.zoomOut(nil) }) {
-                        Label("Zoom Out", systemImage: "minus.magnifyingglass")
-                    }
-                    .help("Zoom out PDF")
-                    .disabled(pdfViewInstance == nil || !(pdfViewInstance?.canZoomOut ?? false))
-                    Button(action: { pdfViewInstance?.autoScales = true }) {
-                        Label("Actual Size", systemImage: "1.magnifyingglass")
-                    }
-                    .help("Reset PDF zoom to fit")
-                    .disabled(pdfViewInstance == nil)
-                    Button(action: { pdfViewInstance?.zoomIn(nil) }) {
-                        Label("Zoom In", systemImage: "plus.magnifyingglass")
-                    }
-                    .help("Zoom in PDF")
-                    .disabled(pdfViewInstance == nil || !(pdfViewInstance?.canZoomIn ?? false))
-                }
-            }
-            
-            ToolbarSpacer(.fixed, placement: .automatic)
-            
-            ToolbarItem(id: "search", placement: .automatic) {
-                ToolbarSearchField(text: $searchQuery, prompt: "Search") {
-                    performSearch()
-                }
-                .frame(width: 200)
-            }
         }
         .sheet(isPresented: $showPronunciationEditor) {
             PronunciationEditorView(
@@ -575,14 +537,13 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showCleanupLogSheet) {
             CleanupLogView(
-                cleanupLog: cleanupLog,
-                isCleaningInBackground: isCleaningInBackground,
-                backgroundCleanProgress: backgroundCleanProgress,
-                backgroundCleanStatus: backgroundCleanStatus,
-                onStopCleanup: stopCleanup,
+                cleanupLog: aiCleanupManager.cleanupLog,
+                isCleaningInBackground: aiCleanupManager.isCleaningInBackground,
+                backgroundCleanProgress: aiCleanupManager.backgroundCleanProgress,
+                backgroundCleanStatus: aiCleanupManager.backgroundCleanStatus,
+                onStopCleanup: { aiCleanupManager.stopCleanup() },
                 onRevert: { entry in
-                    aiCleanedChunks.removeValue(forKey: entry.chunkIndex)
-                    cleanupLog = cleanupLog.filter { $0.id != entry.id }
+                    aiCleanupManager.revert(entry: entry)
                     buildDisplayText()
                 },
                 onDone: { showCleanupLogSheet = false }
@@ -625,8 +586,7 @@ struct ContentView: View {
 
     private func handleAICleanupToggle(_: Bool, enabled: Bool) {
         if !enabled {
-            aiCleanedChunks = [:]
-            cleanupLog = []
+            aiCleanupManager.clear()
             buildDisplayText()
         }
     }
@@ -641,8 +601,7 @@ struct ContentView: View {
         let wasPlaying = speechManager.isPlaying
         if wasPlaying { speechManager.stop() }
         cleanedText = applyPronunciations(TextProcessor.process(newValue, options: textProcessorOptions))
-        aiCleanedChunks = [:]
-        cleanupLog = []
+        aiCleanupManager.clear()
         speechManager.resetCursor()
         parsedSections = SectionParser.parse(text: cleanedText)
         buildDisplayText()
@@ -882,50 +841,10 @@ struct ContentView: View {
     // MARK: - PDF Import
 
     private func importPDF() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.pdf]
-        panel.allowsMultipleSelection = false
-        panel.message = "Select a PDF to import"
-
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        guard let document = PDFDocument(url: url) else { return }
-
+        guard let (document, extractedText) = PDFImportProcessor.importDocument() else { return }
         pdfDocument = document
-        cleanupGeneration += 1
-
-        var pageTexts: [Int: String] = [:]
-        for i in 0..<document.pageCount {
-            pageTexts[i] = document.page(at: i)?.string ?? ""
-        }
-        rawText = assembleExtractedText(document: document, pageTexts: pageTexts)
-    }
-
-    /// True if the only differences between original and modified are whitespace (spaces, newlines, etc).
-    private func isWhitespaceOnlyChange(original: String, modified: String) -> Bool {
-        let norm = { (s: String) in s.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ") }
-        return norm(original) == norm(modified)
-    }
-
-    /// Splits text into ~1000-character chunks, breaking at word boundaries when possible.
-    private func makeChunks(from text: String, chunkSize: Int = 1000) -> [(start: Int, end: Int)] {
-        let nsText = text as NSString
-        guard nsText.length > 0 else { return [] }
-        var chunks: [(Int, Int)] = []
-        var pos = 0
-        while pos < nsText.length {
-            var end = min(pos + chunkSize, nsText.length)
-            if end < nsText.length {
-                let fragment = nsText.substring(with: NSRange(location: pos, length: end - pos))
-                if let nl = fragment.lastIndex(of: "\n") {
-                    end = pos + fragment.distance(from: fragment.startIndex, to: nl) + 1
-                } else if let sp = fragment.lastIndex(of: " ") {
-                    end = pos + fragment.distance(from: fragment.startIndex, to: sp) + 1
-                }
-            }
-            chunks.append((pos, end))
-            pos = end
-        }
-        return chunks
+        aiCleanupManager.stopCleanup()
+        rawText = extractedText
     }
 
     /// Builds displayText from cleanedText, applying AI-cleaned chunk overrides.
@@ -939,46 +858,13 @@ struct ContentView: View {
             return
         }
 
-        if aiCleanedChunks.isEmpty {
-            displayText = text
-            displaySectionOffsets = parsedSections.isEmpty ? [0, nsText.length] : parsedSections.map { $0.utf16Offset } + [nsText.length]
-            return
-        }
-
-        let chunks = makeChunks(from: text)
-        var result = ""
-        for (idx, (start, end)) in chunks.enumerated() {
-            let original = nsText.substring(with: NSRange(location: start, length: end - start))
-            result += aiCleanedChunks[idx] ?? original
-        }
-
-        // Compute displaySectionOffsets: offsets[i] = displayText position where section i starts
-        var offsets: [Int]
-        if parsedSections.isEmpty {
-            offsets = [0, (result as NSString).length]
-        } else {
-            var outPos = 0
-            var sectionIdx = 0
-            offsets = [0]
-            for (idx, (start, end)) in chunks.enumerated() {
-                let content = aiCleanedChunks[idx] ?? nsText.substring(with: NSRange(location: start, length: end - start))
-                let len = (content as NSString).length
-                while sectionIdx < parsedSections.count {
-                    let s = parsedSections[sectionIdx].utf16Offset
-                    if start <= s && s < end {
-                        offsets.append(outPos)
-                        sectionIdx += 1
-                    } else {
-                        break
-                    }
-                }
-                outPos += len
-            }
-            while offsets.count < parsedSections.count + 1 {
-                offsets.append(outPos)
-            }
-        }
-
+        let chunks = AICleanupManager.makeChunks(from: text)
+        let (result, offsets) = AICleanupManager.buildDisplayTextFromChunks(
+            cleanedText: text,
+            aiCleanedChunks: aiCleanupManager.aiCleanedChunks,
+            chunks: chunks,
+            parsedSections: parsedSections
+        )
         displayText = result
         displaySectionOffsets = offsets
 
@@ -988,120 +874,23 @@ struct ContentView: View {
         }
     }
 
-    /// Kicks off background AI cleanup of 500-char chunks (from cleanedText) containing figure/table indicators.
-    /// Updates displayText incrementally as each chunk is cleaned. Changelog entries are labeled by section name.
-    private func stopCleanup() {
-        cleanupGeneration += 1
-    }
-
     private func startChunkBasedAICleanup() {
         guard removeFiguresAndTables else { return }
 
-        let model = SystemLanguageModel.default
-        guard case .available = model.availability else { return }
-
-        let currentGeneration = cleanupGeneration
-        let text = cleanedText
-        let nsText = text as NSString
-
-        guard nsText.length > 0 else { return }
-
-        let chunks = makeChunks(from: text)
-        let indicesToClean = chunks.enumerated()
-            .filter { (_, range) in range.end - range.start >= 200 }
-            .map(\.offset)
-
-        guard !indicesToClean.isEmpty else { return }
-
-        isCleaningInBackground = true
-        backgroundCleanProgress = 0
-        backgroundCleanStatus = "Cleaning 1/\(indicesToClean.count)..."
-
-        // Precompute section names for changelog labels (which section each chunk falls in)
-        let sectionTitlesByChunk: [Int: String] = Dictionary(uniqueKeysWithValues: indicesToClean.map { idx in
-            let start = chunks[idx].start
-            let title: String
-            if parsedSections.isEmpty {
-                title = "Chunk \(idx + 1)"
-            } else {
-                let i = (0..<parsedSections.count).last(where: { parsedSections[$0].utf16Offset <= start }) ?? 0
-                title = parsedSections[i].title
-            }
-            return (idx, title)
-        })
-
-        Task {
-            for (step, chunkIdx) in indicesToClean.enumerated() {
-                if cleanupGeneration != currentGeneration {
-                    await MainActor.run { isCleaningInBackground = false }
-                    return
-                }
-
-                await MainActor.run {
-                    backgroundCleanProgress = Double(step) / Double(indicesToClean.count)
-                    backgroundCleanStatus = "Cleaning \(step + 1)/\(indicesToClean.count)..."
-                }
-
-                let (start, end) = chunks[chunkIdx]
-                let chunkText = nsText.substring(with: NSRange(location: start, length: end - start))
-                let sectionTitle = sectionTitlesByChunk[chunkIdx] ?? "Chunk \(chunkIdx + 1)"
-                let originalLength = chunkText.count
-
-                let cleanedChunk = await aiCleanSection(chunkText)
-                let hasMeaningfulChange = !isWhitespaceOnlyChange(original: chunkText, modified: cleanedChunk)
-                let finalChunk = hasMeaningfulChange ? cleanedChunk : chunkText
-
-                await MainActor.run {
-                    if cleanupGeneration != currentGeneration { return }
-                    if hasMeaningfulChange {
-                        aiCleanedChunks[chunkIdx] = finalChunk
-                        cleanupLog.append(CleanupLogEntry(
-                            chunkIndex: chunkIdx,
-                            sectionTitle: sectionTitle,
-                            beforeText: chunkText,
-                            afterText: finalChunk,
-                            originalLength: originalLength,
-                            cleanedLength: finalChunk.count
-                        ))
-                        buildDisplayText()
-                    }
+        let chunks = AICleanupManager.makeChunks(from: cleanedText)
+        aiCleanupManager.startChunkBasedCleanup(
+            cleanedText: cleanedText,
+            parsedSections: parsedSections,
+            aiCleanupPrompt: aiCleanupPrompt,
+            onDisplayTextUpdate: { newText, newOffsets in
+                displayText = newText
+                displaySectionOffsets = newOffsets
+                let newLen = (newText as NSString).length
+                if speechManager.cursorUTF16 >= newLen {
+                    speechManager.cursorUTF16 = max(0, newLen - 1)
                 }
             }
-
-            await MainActor.run {
-                backgroundCleanProgress = 1.0
-                backgroundCleanStatus = ""
-                isCleaningInBackground = false
-            }
-        }
-    }
-
-    /// Uses Apple Intelligence to clean text according to the user-configurable prompt.
-    private func aiCleanSection(_ text: String) async -> String {
-        let model = SystemLanguageModel.default
-        guard case .available = model.availability else { return text }
-        guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { return text }
-
-        do {
-            let instructions = aiCleanupPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-            let session = LanguageModelSession(instructions: instructions.isEmpty ? "Return the text unchanged." : instructions)
-            let response = try await session.respond(to: text)
-            return response.content
-        } catch {
-            return text
-        }
-    }
-
-    /// Assembles the final extracted text with PAGE markers from per-page text.
-    private func assembleExtractedText(document: PDFDocument, pageTexts: [Int: String]) -> String {
-        var result = ""
-        for i in 0..<document.pageCount {
-            result += "--SE_NEWLINE--PAGE \(i)--SE_NEWLINE--\n"
-            if let text = pageTexts[i] {
-                result += text + "\n"
-            }
-        }
-        return result
+        )
     }
 }
 
