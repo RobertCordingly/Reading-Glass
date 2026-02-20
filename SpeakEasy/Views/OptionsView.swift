@@ -40,7 +40,7 @@ struct OptionsView: View {
                 }
                 Toggle(isOn: $ignoreReferences) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Ignore References")
+                        Text("Ignore After References")
                             .font(.system(size: 13))
                         Text("Truncate text after the References section")
                             .font(.system(size: 11))

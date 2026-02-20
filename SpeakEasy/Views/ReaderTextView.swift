@@ -7,6 +7,7 @@ struct ReaderTextView: NSViewRepresentable {
     let text: String
     let cursorUTF16: Int
     let cursorLengthUTF16: Int
+    var isPlaying: Bool = false
     let onWordClicked: (Int) -> Void  // passes UTF-16 offset of clicked word start
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -48,10 +49,12 @@ struct ReaderTextView: NSViewRepresentable {
             updateHighlighting(textView)
         }
 
-        // Scroll to keep the highlighted word visible
-        let highlightRange = currentHighlightNSRange()
-        if highlightRange.length > 0 && highlightRange.location < (textView.string as NSString).length {
-            textView.scrollRangeToVisible(highlightRange)
+        // Scroll to keep the highlighted word visible (only while reading)
+        if isPlaying {
+            let highlightRange = currentHighlightNSRange()
+            if highlightRange.length > 0 && highlightRange.location < (textView.string as NSString).length {
+                textView.scrollRangeToVisible(highlightRange)
+            }
         }
 
         context.coordinator.text = text

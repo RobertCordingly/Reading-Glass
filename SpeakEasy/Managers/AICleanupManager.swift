@@ -13,6 +13,11 @@ final class AICleanupManager: ObservableObject {
 
     private var cleanupGeneration = 0
 
+    private let typoFixPrompt = """
+        Fix any spelling errors, typos, or garbage/unreadable characters in this text. \
+        Do not remove any content. Return the corrected text exactly as-is otherwise.
+        """
+
     /// Clears all AI cleanup state.
     func clear() {
         aiCleanedChunks = [:]
@@ -63,16 +68,19 @@ final class AICleanupManager: ObservableObject {
         return response.content
     }
 
-    /// Runs chunk-based AI cleanup on the given text.
+    /// Runs chunk-based AI cleanup on chunks around the cursor position.
+    /// Each chunk goes through two passes: typo fixing, then content cleanup.
     /// - Parameters:
     ///   - cleanedText: The full text to clean
     ///   - parsedSections: Section headers for changelog labels
-    ///   - aiCleanupPrompt: Instructions sent to the AI for each chunk
+    ///   - aiCleanupPrompt: Instructions sent to the AI for each chunk (Pass 2)
+    ///   - cursorUTF16: Current cursor position — cleanup focuses on chunks around this offset
     ///   - onDisplayTextUpdate: Called after each chunk is cleaned, with the updated merged text
     func startChunkBasedCleanup(
         cleanedText: String,
         parsedSections: [SectionItem],
         aiCleanupPrompt: String,
+        cursorUTF16: Int,
         onDisplayTextUpdate: @escaping (String, [Int]) -> Void
     ) {
         let model = SystemLanguageModel.default
@@ -83,15 +91,20 @@ final class AICleanupManager: ObservableObject {
         guard nsText.length > 0 else { return }
 
         let chunks = Self.makeChunks(from: cleanedText)
-        let indicesToClean = chunks.enumerated()
-            .filter { (_, range) in range.end - range.start >= 200 }
-            .map(\.offset)
+
+        // Find chunk containing cursor and select a window of ±5 chunks
+        let cursorChunkIdx = chunks.firstIndex(where: { $0.end > cursorUTF16 }) ?? 0
+        let windowStart = max(0, cursorChunkIdx - 5)
+        let windowEnd = min(chunks.count, cursorChunkIdx + 6)
+
+        let indicesToClean = (windowStart..<windowEnd)
+            .filter { idx in chunks[idx].end - chunks[idx].start >= 20 }
 
         guard !indicesToClean.isEmpty else { return }
 
         isCleaningInBackground = true
         backgroundCleanProgress = 0
-        backgroundCleanStatus = "Cleaning 1/\(indicesToClean.count)..."
+        backgroundCleanStatus = "Typos 1/\(indicesToClean.count)..."
 
         let sectionTitlesByChunk: [Int: String] = Dictionary(uniqueKeysWithValues: indicesToClean.map { idx in
             let start = chunks[idx].start
@@ -112,19 +125,28 @@ final class AICleanupManager: ObservableObject {
                     return
                 }
 
-                backgroundCleanProgress = Double(step) / Double(indicesToClean.count)
-                backgroundCleanStatus = "Cleaning \(step + 1)/\(indicesToClean.count)..."
-
                 let (start, end) = chunks[chunkIdx]
                 let chunkText = nsText.substring(with: NSRange(location: start, length: end - start))
                 let sectionTitle = sectionTitlesByChunk[chunkIdx] ?? "Chunk \(chunkIdx + 1)"
                 let originalLength = chunkText.count
 
-                let cleanedChunk = await aiCleanSection(chunkText, prompt: aiCleanupPrompt)
-                let hasMeaningfulChange = !Self.isWhitespaceOnlyChange(original: chunkText, modified: cleanedChunk)
-                let finalChunk = hasMeaningfulChange ? cleanedChunk : chunkText
+                // Pass 1: Fix typos
+                backgroundCleanProgress = (Double(step) * 2) / Double(indicesToClean.count * 2)
+                backgroundCleanStatus = "Typos \(step + 1)/\(indicesToClean.count)..."
 
+                let afterTypos = await aiCleanSection(chunkText, prompt: typoFixPrompt)
                 if cleanupGeneration != currentGeneration { return }
+
+                // Pass 2: Content cleanup
+                backgroundCleanProgress = (Double(step) * 2 + 1) / Double(indicesToClean.count * 2)
+                backgroundCleanStatus = "Cleanup \(step + 1)/\(indicesToClean.count)..."
+
+                let afterCleanup = await aiCleanSection(afterTypos, prompt: aiCleanupPrompt)
+                if cleanupGeneration != currentGeneration { return }
+
+                let hasMeaningfulChange = !Self.isWhitespaceOnlyChange(original: chunkText, modified: afterCleanup)
+                let finalChunk = hasMeaningfulChange ? afterCleanup : chunkText
+
                 if hasMeaningfulChange {
                     aiCleanedChunks[chunkIdx] = finalChunk
                     cleanupLog.append(CleanupLogEntry(
@@ -168,23 +190,21 @@ final class AICleanupManager: ObservableObject {
 
     // MARK: - Static helpers
 
-    static func makeChunks(from text: String, chunkSize: Int = 1000) -> [(start: Int, end: Int)] {
+    /// Splits text into one chunk per sentence.
+    static func makeChunks(from text: String) -> [(start: Int, end: Int)] {
         let nsText = text as NSString
         guard nsText.length > 0 else { return [] }
+
         var chunks: [(Int, Int)] = []
-        var pos = 0
-        while pos < nsText.length {
-            var end = min(pos + chunkSize, nsText.length)
-            if end < nsText.length {
-                let fragment = nsText.substring(with: NSRange(location: pos, length: end - pos))
-                if let nl = fragment.lastIndex(of: "\n") {
-                    end = pos + fragment.distance(from: fragment.startIndex, to: nl) + 1
-                } else if let sp = fragment.lastIndex(of: " ") {
-                    end = pos + fragment.distance(from: fragment.startIndex, to: sp) + 1
-                }
-            }
-            chunks.append((pos, end))
-            pos = end
+        nsText.enumerateSubstrings(
+            in: NSRange(location: 0, length: nsText.length),
+            options: .bySentences
+        ) { _, substringRange, _, _ in
+            chunks.append((substringRange.location, substringRange.location + substringRange.length))
+        }
+
+        if chunks.isEmpty {
+            return [(0, nsText.length)]
         }
         return chunks
     }

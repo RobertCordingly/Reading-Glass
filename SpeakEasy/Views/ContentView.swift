@@ -46,6 +46,9 @@ struct ContentView: View {
         """
     @AppStorage("showEditor") private var showEditor = false
     @AppStorage("speedMultiplier") private var speedMultiplier = 2.0
+    @State private var hasPendingCleanupUpdates = false
+    @State private var currentPDFPage: Int = 0
+    @State private var totalPDFPages: Int = 0
     @State private var showCleanupLogSheet = false
     @State private var showSummarySheet = false
     @State private var summaryText = ""
@@ -263,17 +266,34 @@ struct ContentView: View {
                         document: pdfDocument,
                         highlightText: pdfHighlightText,
                         highlightPage: pdfHighlightPage,
+                        isPlaying: speechManager.isPlaying,
                         onWordSelected: { word, _, _ in
                             searchQuery = word
                             performSearch()
                         },
                         onPDFViewReady: { view in
                             pdfViewInstance = view
+                        },
+                        onPageChange: { page, total in
+                            currentPDFPage = page
+                            totalPDFPages = total
                         }
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                    // Bottom fade overlay on PDF view
+                    // Top fade overlay
+                    VStack(spacing: 0) {
+                        LinearGradient(
+                            colors: [Color(nsColor: .windowBackgroundColor), .clear],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                        .frame(height: 75)
+                        Spacer()
+                    }
+                    .allowsHitTesting(false)
+
+                    // Bottom fade overlay
                     VStack(spacing: 0) {
                         Spacer()
                         LinearGradient(
@@ -281,9 +301,27 @@ struct ContentView: View {
                             startPoint: .top,
                             endPoint: .bottom
                         )
-                        .frame(height: 100)
+                        .frame(height: 75)
                     }
                     .allowsHitTesting(false)
+
+                    // Floating page number pill at the top-right
+                    if totalPDFPages > 0 {
+                        VStack {
+                            HStack {
+                                Spacer()
+                                Text("Page \(currentPDFPage) of \(totalPDFPages)")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 6)
+                                    .glassEffect(.regular, in: .capsule)
+                            }
+                            .padding(.top, 12)
+                            .padding(.trailing, 16)
+                            Spacer()
+                        }
+                        .allowsHitTesting(false)
+                    }
 
                     // Floating playback pill at the bottom — centered over PDF area
                     VStack {
@@ -335,6 +373,7 @@ struct ContentView: View {
                         text: (displayText.isEmpty ? "" : displayText) + "\n\n\n\n\n",
                         cursorUTF16: speechManager.cursorUTF16,
                         cursorLengthUTF16: speechManager.cursorLengthUTF16,
+                        isPlaying: speechManager.isPlaying,
                         onWordClicked: { utf16Offset in
                             jumpCursor(to: utf16Offset)
                         }
@@ -569,6 +608,12 @@ struct ContentView: View {
             .onChange(of: showEditor, handleShowEditorChange)
             .onChange(of: rawText, handleRawTextChange)
             .onChange(of: speechManager.cursorUTF16) { _, _ in updatePDFHighlight() }
+            .onChange(of: speechManager.isPlaying) { oldValue, newValue in
+                if oldValue && !newValue && hasPendingCleanupUpdates {
+                    buildDisplayText()
+                    hasPendingCleanupUpdates = false
+                }
+            }
             .onAppear(perform: handleOnAppear)
             .onDisappear { speechManager.stop() }
     }
@@ -877,17 +922,21 @@ struct ContentView: View {
     private func startChunkBasedAICleanup() {
         guard removeFiguresAndTables else { return }
 
-        let chunks = AICleanupManager.makeChunks(from: cleanedText)
         aiCleanupManager.startChunkBasedCleanup(
             cleanedText: cleanedText,
             parsedSections: parsedSections,
             aiCleanupPrompt: aiCleanupPrompt,
+            cursorUTF16: speechManager.cursorUTF16,
             onDisplayTextUpdate: { newText, newOffsets in
-                displayText = newText
-                displaySectionOffsets = newOffsets
-                let newLen = (newText as NSString).length
-                if speechManager.cursorUTF16 >= newLen {
-                    speechManager.cursorUTF16 = max(0, newLen - 1)
+                if speechManager.isPlaying {
+                    hasPendingCleanupUpdates = true
+                } else {
+                    displayText = newText
+                    displaySectionOffsets = newOffsets
+                    let newLen = (newText as NSString).length
+                    if speechManager.cursorUTF16 >= newLen {
+                        speechManager.cursorUTF16 = max(0, newLen - 1)
+                    }
                 }
             }
         )

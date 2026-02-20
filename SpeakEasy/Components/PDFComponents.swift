@@ -78,8 +78,10 @@ struct PDFKitView: NSViewRepresentable {
     let document: PDFDocument?
     let highlightText: String
     let highlightPage: Int?
+    var isPlaying: Bool = false
     let onWordSelected: (String, Int, Int) -> Void  // (word, pageIndex, occurrence)
     let onPDFViewReady: (PDFView) -> Void
+    var onPageChange: ((Int, Int) -> Void)?  // (currentPage, totalPages)
 
     func makeNSView(context: Context) -> PDFView {
         let pdfView = PDFView()
@@ -107,12 +109,13 @@ struct PDFKitView: NSViewRepresentable {
             pdfView.document = document
         }
         context.coordinator.onWordSelected = onWordSelected
+        context.coordinator.onPageChange = onPageChange
 
         highlightInPDF(pdfView, context: context)
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onWordSelected: onWordSelected)
+        Coordinator(onWordSelected: onWordSelected, onPageChange: onPageChange)
     }
 
     private func highlightInPDF(_ pdfView: PDFView, context: Context) {
@@ -197,8 +200,8 @@ struct PDFKitView: NSViewRepresentable {
         coord.lastPDFPage = match.pages.first
         coord.currentHighlightMatch = match
 
-        // Only scroll if the match is not already visible on screen
-        if let page = match.pages.first {
+        // Only auto-scroll while reading
+        if isPlaying, let page = match.pages.first {
             let pageBounds = match.bounds(for: page)
             let viewRect = pdfView.convert(pageBounds, from: page)
             let visibleRect = pdfView.bounds.insetBy(dx: 0, dy: 40)
@@ -245,6 +248,7 @@ struct PDFKitView: NSViewRepresentable {
 
     class Coordinator: NSObject, PDFPageOverlayViewProvider {
         var onWordSelected: (String, Int, Int) -> Void
+        var onPageChange: ((Int, Int) -> Void)?
         var lastPDFPage: PDFPage?
 
         // Glass highlight overlay
@@ -252,8 +256,7 @@ struct PDFKitView: NSViewRepresentable {
         var currentHighlightMatch: PDFSelection?
         private var scrollObserver: NSObjectProtocol?
 
-        // Sticky page number overlay
-        var pageNumberOverlay: NSHostingView<AnyView>?
+        // Page tracking
         var currentVisiblePage: Int = -1
 
         // Jump stabilization: require consecutive "votes" before jumping far
@@ -264,8 +267,9 @@ struct PDFKitView: NSViewRepresentable {
         var bypassStabilization = false  // set true on manual clicks to skip buffering
         private var zoomObserver: NSObjectProtocol?
 
-        init(onWordSelected: @escaping (String, Int, Int) -> Void) {
+        init(onWordSelected: @escaping (String, Int, Int) -> Void, onPageChange: ((Int, Int) -> Void)?) {
             self.onWordSelected = onWordSelected
+            self.onPageChange = onPageChange
         }
 
         deinit {
@@ -296,7 +300,7 @@ struct PDFKitView: NSViewRepresentable {
                 ) { [weak self, weak pdfView] _ in
                     guard let self, let pdfView else { return }
                     self.repositionGlassOverlay(in: pdfView)
-                    self.updatePageNumberOverlay(in: pdfView)
+                    self.updatePageNumber(in: pdfView)
                 }
             }
 
@@ -308,20 +312,20 @@ struct PDFKitView: NSViewRepresentable {
             ) { [weak self, weak pdfView] _ in
                 guard let self, let pdfView else { return }
                 self.repositionGlassOverlay(in: pdfView)
-                self.updatePageNumberOverlay(in: pdfView)
+                self.updatePageNumber(in: pdfView)
             }
 
             // Initial page number update
             DispatchQueue.main.async { [weak self, weak pdfView] in
                 guard let self, let pdfView else { return }
-                self.updatePageNumberOverlay(in: pdfView)
+                self.updatePageNumber(in: pdfView)
             }
         }
 
         func repositionGlassOverlay(in pdfView: PDFView) {
             guard let match = currentHighlightMatch,
                   let page = match.pages.first else {
-                glassOverlay?.isHidden = true
+                glassOverlay?.isHidden = false
                 return
             }
 
@@ -331,7 +335,7 @@ struct PDFKitView: NSViewRepresentable {
 
             // Hide if off-screen
             if !pdfView.bounds.intersects(padded) {
-                glassOverlay?.isHidden = true
+                glassOverlay?.isHidden = false
                 return
             }
 
@@ -348,53 +352,17 @@ struct PDFKitView: NSViewRepresentable {
             glassOverlay?.isHidden = false
         }
 
-        // MARK: - Sticky Page Number Overlay
+        // MARK: - Page Number Tracking
 
-        func updatePageNumberOverlay(in pdfView: PDFView) {
-            // Determine which page is visible at the top of the view
+        func updatePageNumber(in pdfView: PDFView) {
             let topCenter = CGPoint(x: pdfView.bounds.midX, y: pdfView.bounds.maxY - 20)
             guard let page = pdfView.page(for: topCenter, nearest: true),
-                  let document = pdfView.document else {
-                pageNumberOverlay?.isHidden = true
-                return
-            }
+                  let document = pdfView.document else { return }
 
             let pageIndex = document.index(for: page)
-            let totalPages = document.pageCount
-            let isDark = NSApp.effectiveAppearance.name == .darkAqua
-            let colorScheme: ColorScheme = isDark ? .dark : .light
-
-            let pagePillView = Text("Page \(pageIndex + 1) of \(totalPages)")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.primary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .glassEffect(.regular, in: .capsule)
-                .environment(\.colorScheme, colorScheme)
-
-            // Create or update the overlay
-            if pageNumberOverlay == nil {
-                let pillView = NSHostingView(rootView: AnyView(pagePillView))
-                pillView.appearance = NSApp.effectiveAppearance
-                pillView.translatesAutoresizingMaskIntoConstraints = false
-                pdfView.addSubview(pillView)
-                NSLayoutConstraint.activate([
-                    pillView.topAnchor.constraint(equalTo: pdfView.topAnchor, constant: 12),
-                    pillView.trailingAnchor.constraint(equalTo: pdfView.trailingAnchor, constant: -16),
-                ])
-                pageNumberOverlay = pillView
+            if pageIndex != currentVisiblePage {
                 currentVisiblePage = pageIndex
-            } else if pageIndex != currentVisiblePage {
-                currentVisiblePage = pageIndex
-                pageNumberOverlay?.rootView = AnyView(pagePillView)
-            }
-
-            pageNumberOverlay?.isHidden = false
-            pageNumberOverlay?.appearance = NSApp.effectiveAppearance
-
-            // Keep it on top of other subviews
-            if let overlay = pageNumberOverlay {
-                pdfView.addSubview(overlay, positioned: .above, relativeTo: nil)
+                onPageChange?(pageIndex + 1, document.pageCount)
             }
         }
 

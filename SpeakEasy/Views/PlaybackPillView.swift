@@ -313,9 +313,9 @@ struct PlaybackPillView: View {
                 .menuStyle(.borderlessButton)
             }
         }
-        .foregroundStyle(.primary)
+        //.foregroundStyle(.primary)
         .padding(.horizontal, 30)
         .padding(.vertical, 18)
-        .glassEffect(.regular, in: .capsule)
+        .glassEffect()
     }
 }
