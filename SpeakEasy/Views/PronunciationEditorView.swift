@@ -1,5 +1,4 @@
 import SwiftUI
-import AppKit
 
 /// Pronunciation replacements editor sheet.
 struct PronunciationEditorView: View {

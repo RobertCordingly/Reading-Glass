@@ -11,7 +11,7 @@
 		AA000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000012 /* ContentView.swift */; };
 		AA000003 /* SpeechManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000013 /* SpeechManager.swift */; };
 		AA000004 /* TextProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000014 /* TextProcessor.swift */; };
-		AA000005 /* ReaderTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000015 /* ReaderTextView.swift */; };
+		AA000005 /* ReaderTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000015 /* ReaderTextView.swift */; platformFilters = (macos, ); };
 		AA000006 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AA000016 /* Assets.xcassets */; };
 		AA000007 /* PlaybackPillView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000017 /* PlaybackPillView.swift */; };
 		AA000008 /* EditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000018 /* EditorView.swift */; };
@@ -23,8 +23,12 @@
 		AA0000A9 /* OptionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000AA /* OptionsView.swift */; };
 		AA0000AB /* PronunciationEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000AC /* PronunciationEditorView.swift */; };
 		AA0000AD /* SummarySheetView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000AE /* SummarySheetView.swift */; };
-		AA0000AF /* PDFComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000B0 /* PDFComponents.swift */; };
-		AA0000B1 /* PDFImportProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000B2 /* PDFImportProcessor.swift */; };
+		AA0000AF /* PDFComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000B0 /* PDFComponents.swift */; platformFilters = (macos, ); };
+		AA0000B1 /* PDFImportProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000B2 /* PDFImportProcessor.swift */; platformFilters = (macos, ); };
+		AA0000C9 /* PlatformAdapters.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000C8 /* PlatformAdapters.swift */; };
+		AA0000CB /* ReaderTextView_iPad.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000CA /* ReaderTextView_iPad.swift */; platformFilters = (ios, ); };
+		AA0000CD /* PDFComponents_iPad.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000CC /* PDFComponents_iPad.swift */; platformFilters = (ios, ); };
+		AA0000CF /* PDFImportProcessor_iPad.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000CE /* PDFImportProcessor_iPad.swift */; platformFilters = (ios, ); };
 		AA0000B3 /* AICleanupManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000B4 /* AICleanupManager.swift */; };
 /* End PBXBuildFile section */
 
@@ -49,6 +53,10 @@
 		AA0000B0 /* PDFComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFComponents.swift; sourceTree = "<group>"; };
 		AA0000B2 /* PDFImportProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFImportProcessor.swift; sourceTree = "<group>"; };
 		AA0000B4 /* AICleanupManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AICleanupManager.swift; sourceTree = "<group>"; };
+		AA0000C8 /* PlatformAdapters.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlatformAdapters.swift; sourceTree = "<group>"; };
+		AA0000CA /* ReaderTextView_iPad.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderTextView_iPad.swift; sourceTree = "<group>"; };
+		AA0000CC /* PDFComponents_iPad.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFComponents_iPad.swift; sourceTree = "<group>"; };
+		AA0000CE /* PDFImportProcessor_iPad.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFImportProcessor_iPad.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -85,6 +93,7 @@
 				AA000018 /* EditorView.swift */,
 				AA000019 /* SectionsView.swift */,
 				AA000015 /* ReaderTextView.swift */,
+				AA0000CA /* ReaderTextView_iPad.swift */,
 				AA000017 /* PlaybackPillView.swift */,
 				AA0000A6 /* SearchResultsView.swift */,
 				AA0000A8 /* CleanupLogView.swift */,
@@ -107,6 +116,7 @@
 			isa = PBXGroup;
 			children = (
 				AA0000B0 /* PDFComponents.swift */,
+				AA0000CC /* PDFComponents_iPad.swift */,
 				AA0000A4 /* SectionParser.swift */,
 			);
 			path = Components;
@@ -126,6 +136,7 @@
 			children = (
 				AA000014 /* TextProcessor.swift */,
 				AA0000B2 /* PDFImportProcessor.swift */,
+				AA0000CE /* PDFImportProcessor_iPad.swift */,
 			);
 			path = Processing;
 			sourceTree = "<group>";
@@ -148,6 +159,7 @@
 				AA0000C5 /* Managers */,
 				AA0000C6 /* Processing */,
 				AA0000C7 /* Resources */,
+				AA0000C8 /* PlatformAdapters.swift */,
 			);
 			path = SpeakEasy;
 			sourceTree = "<group>";
@@ -229,6 +241,7 @@
 				AA000003 /* SpeechManager.swift in Sources */,
 				AA000004 /* TextProcessor.swift in Sources */,
 				AA000005 /* ReaderTextView.swift in Sources */,
+				AA0000CB /* ReaderTextView_iPad.swift in Sources */,
 				AA000007 /* PlaybackPillView.swift in Sources */,
 				AA000008 /* EditorView.swift in Sources */,
 				AA000009 /* SectionsView.swift in Sources */,
@@ -240,8 +253,11 @@
 				AA0000AB /* PronunciationEditorView.swift in Sources */,
 				AA0000AD /* SummarySheetView.swift in Sources */,
 				AA0000AF /* PDFComponents.swift in Sources */,
+				AA0000CD /* PDFComponents_iPad.swift in Sources */,
 				AA0000B1 /* PDFImportProcessor.swift in Sources */,
+				AA0000CF /* PDFImportProcessor_iPad.swift in Sources */,
 				AA0000B3 /* AICleanupManager.swift in Sources */,
+				AA0000C9 /* PlatformAdapters.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -366,15 +382,22 @@
 				INFOPLIST_KEY_CFBundleName = "Reading Glass";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
+					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.speakeasy.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "macosx iphoneos iphonesimulator";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
 		};
@@ -393,15 +416,22 @@
 				INFOPLIST_KEY_CFBundleName = "Reading Glass";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
+					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.speakeasy.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "macosx iphoneos iphonesimulator";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
 		};

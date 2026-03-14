@@ -1,6 +1,8 @@
-import AppKit
 import Foundation
 import NaturalLanguage
+#if os(macOS)
+import AppKit
+#endif
 
 struct TextProcessorOptions {
     var skipCitations: Bool = true
@@ -351,6 +353,7 @@ enum TextProcessor {
     /// by inserting f-ligature combinations at the break point, checking against the
     /// macOS spell checker to find a valid word.
     private static func fixBrokenLigatures(_ text: String) -> String {
+        #if os(macOS)
         let checker = NSSpellChecker.shared
         // Ligature replacements to try, ordered longest first so we prefer "ffi" over "fi"
         let ligatureOptions = ["ffi", "ffl", "ff", "fi", "fl"]
@@ -386,8 +389,13 @@ enum TextProcessor {
         }
 
         return words.joined(separator: " ")
+        #else
+        // NSSpellChecker is not available on iOS; return text unchanged.
+        return text
+        #endif
     }
 
+    #if os(macOS)
     /// Tries to repair a single broken word by replacing each non-letter character
     /// with possible f-ligature strings and checking if the result is a real word.
     private static func repairWord(_ word: String, checker: NSSpellChecker, ligatures: [String]) -> String? {
@@ -428,6 +436,7 @@ enum TextProcessor {
 
         return nil
     }
+    #endif
 
     /// Replaces Mathematical Alphanumeric Symbols (U+1D400–U+1D7FF) with plain ASCII letters.
     /// These are styled letters used in PDFs for variables: 𝐴-𝑍, 𝑎-𝑧, 𝟎-𝟗, etc.

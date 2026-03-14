@@ -1,5 +1,4 @@
 import SwiftUI
-import AppKit
 
 /// Section summary sheet (AI-generated).
 struct SummarySheetView: View {
@@ -70,8 +69,7 @@ struct SummarySheetView: View {
 
             HStack {
                 Button("Copy") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(summaryText, forType: .string)
+                    PlatformClipboard.copyString(summaryText)
                 }
                 .disabled(summaryText.isEmpty || isSummarizing)
                 Spacer()

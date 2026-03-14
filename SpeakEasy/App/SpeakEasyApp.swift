@@ -17,9 +17,9 @@ struct SpeakEasyApp: App {
         WindowGroup {
             ContentView()
         }
+        #if os(macOS)
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified(showsTitle: false))
-        //.windowToolbarStyle(.unified)
         .defaultSize(width: 700, height: 500)
         .commands {
             CommandGroup(after: .windowList) {
@@ -28,5 +28,6 @@ struct SpeakEasyApp: App {
                 }
             }
         }
+        #endif
     }
 }

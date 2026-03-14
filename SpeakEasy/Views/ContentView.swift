@@ -1,5 +1,4 @@
 import PDFKit
-import AppKit
 import SwiftUI
 
 struct ContentView: View {
@@ -55,6 +54,9 @@ struct ContentView: View {
     @State private var isSummarizing = false
     @State private var summaryError = ""
     @State private var pronunciations: [PronunciationEntry] = Self.loadPronunciations()
+    #if os(iOS)
+    @State private var showFilePicker = false
+    #endif
 
     private static let defaultPronunciations: [PronunciationEntry] = [
         PronunciationEntry(find: "vCPU", replace: "virtual CPU"),
@@ -284,7 +286,7 @@ struct ContentView: View {
                     // Top fade overlay
                     VStack(spacing: 0) {
                         LinearGradient(
-                            colors: [Color(nsColor: .windowBackgroundColor), .clear],
+                            colors: [Color.platformWindowBackground, .clear],
                             startPoint: .top,
                             endPoint: .bottom
                         )
@@ -297,7 +299,7 @@ struct ContentView: View {
                     VStack(spacing: 0) {
                         Spacer()
                         LinearGradient(
-                            colors: [.clear, Color(nsColor: .windowBackgroundColor)],
+                            colors: [.clear, Color.platformWindowBackground],
                             startPoint: .top,
                             endPoint: .bottom
                         )
@@ -357,7 +359,7 @@ struct ContentView: View {
                     Spacer()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color(nsColor: .controlBackgroundColor))
+                .background(Color.platformControlBackground)
             }
 
         }
@@ -393,7 +395,7 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 Spacer()
                 LinearGradient(
-                    colors: [.clear, Color(nsColor: .windowBackgroundColor)],
+                    colors: [.clear, Color.platformWindowBackground],
                     startPoint: .top,
                     endPoint: .bottom
                 )
@@ -592,7 +594,15 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .openCleanupLog)) { _ in
             showCleanupLogSheet = true
         }
+        #if os(macOS)
         .frame(minWidth: 900, minHeight: 500)
+        #endif
+        #if os(iOS)
+        .fileImporter(isPresented: $showFilePicker, allowedContentTypes: [.pdf]) { result in
+            guard let url = try? result.get() else { return }
+            handlePickedPDF(url: url)
+        }
+        #endif
     }
 
     var body: some View {
@@ -886,11 +896,27 @@ struct ContentView: View {
     // MARK: - PDF Import
 
     private func importPDF() {
+        #if os(macOS)
         guard let (document, extractedText) = PDFImportProcessor.importDocument() else { return }
         pdfDocument = document
         aiCleanupManager.stopCleanup()
         rawText = extractedText
+        #else
+        showFilePicker = true
+        #endif
     }
+
+    #if os(iOS)
+    private func handlePickedPDF(url: URL) {
+        let accessing = url.startAccessingSecurityScopedResource()
+        defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+        guard let document = PDFDocument(url: url) else { return }
+        let extractedText = PDFImportProcessor.extractText(from: document)
+        pdfDocument = document
+        aiCleanupManager.stopCleanup()
+        rawText = extractedText
+    }
+    #endif
 
     /// Builds displayText from cleanedText, applying AI-cleaned chunk overrides.
     /// Also updates displaySectionOffsets for mapping between displayText and sections.
