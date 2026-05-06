@@ -39,3 +39,22 @@ enum PlatformClipboard {
         #endif
     }
 }
+
+// MARK: - Cross-platform image
+
+#if os(macOS)
+typealias PlatformImage = NSImage
+#else
+typealias PlatformImage = UIImage
+#endif
+
+extension Image {
+    /// Convenience init for `NSImage` (macOS) or `UIImage` (iOS) without #ifs at the call site.
+    init(platformImage: PlatformImage) {
+        #if os(macOS)
+        self.init(nsImage: platformImage)
+        #else
+        self.init(uiImage: platformImage)
+        #endif
+    }
+}

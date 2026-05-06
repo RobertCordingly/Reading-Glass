@@ -19,6 +19,10 @@ struct ContentView: View {
     @State private var lastSearchQuery: String = ""
     @State private var lastSearchResult: NSRange = NSRange(location: NSNotFound, length: 0)
     @State private var searchResults: [SearchResult] = []
+    /// Per-page list of bounding rects for the current search query, in PDF page
+    /// coordinates. Built once per search so each thumbnail row can quickly look up
+    /// "the Nth match on page P". Indexed by 1-based page number.
+    @State private var pdfMatchBoundsByPage: [Int: [CGRect]] = [:]
     @State private var parsedSections: [SectionItem] = []
     @State private var showPronunciationEditor = false
     @State private var showOptionsEditor = false
@@ -393,7 +397,13 @@ struct ContentView: View {
                 case .editor:
                     EditorView(text: $rawText)
                 case .search:
-                    SearchResultsView(searchQuery: searchQuery, searchResults: searchResults, onResultSelected: jumpToSearchResult)
+                    SearchResultsView(
+                        searchQuery: searchQuery,
+                        searchResults: searchResults,
+                        pdfDocument: pdfDocument,
+                        pdfMatchBoundsByPage: pdfMatchBoundsByPage,
+                        onResultSelected: jumpToSearchResult
+                    )
                 case .sections:
                     SectionsView(sections: parsedSections, onSectionSelected: jumpToSection)
                 case .hidden:
@@ -651,6 +661,8 @@ struct ContentView: View {
             lastSearchQuery = ""
             lastSearchResult = NSRange(location: NSNotFound, length: 0)
             speechManager.cursorLengthUTF16 = 0
+            searchResults = []
+            pdfMatchBoundsByPage = [:]
         } else if trimmed != lastSearchQuery {
             lastSearchResult = NSRange(location: NSNotFound, length: 0)
         }
@@ -732,24 +744,61 @@ struct ContentView: View {
         let textLength = nsText.length
         guard textLength > 0 else { return }
 
-        // Find ALL matches and populate search results
+        // Pre-compute, for every PDF page, the bounds rects of every occurrence of
+        // the query on that page, in document order. The thumbnail rows look up the
+        // Nth bounds for their page to draw a highlight box on the screenshot.
+        var matchBoundsByPage: [Int: [CGRect]] = [:]
+        if let doc = pdfDocument {
+            let selections = doc.findString(query, withOptions: .caseInsensitive)
+            for selection in selections {
+                for page in selection.pages {
+                    let pageIdx = doc.index(for: page)
+                    guard pageIdx != NSNotFound else { continue }
+                    let bounds = selection.bounds(for: page)
+                    matchBoundsByPage[pageIdx + 1, default: []].append(bounds)
+                }
+            }
+        }
+        pdfMatchBoundsByPage = matchBoundsByPage
+
+        // Find ALL matches in displayText and populate search results.
         var results: [SearchResult] = []
         var searchRange = NSRange(location: 0, length: textLength)
-        let contextChars = 40
+        let contextChars = 110
+        var occurrenceCountPerPage: [Int: Int] = [:]
 
         while searchRange.location < textLength {
             let found = nsText.range(of: query, options: [.caseInsensitive], range: searchRange)
             guard found.location != NSNotFound else { break }
 
-            // Build snippet with surrounding context
+            // Build snippet with surrounding context, rendered as a single line.
             let snippetStart = max(0, found.location - contextChars)
             let snippetEnd = min(textLength, found.location + found.length + contextChars)
             var snippet = nsText.substring(with: NSRange(location: snippetStart, length: snippetEnd - snippetStart))
             snippet = snippet.replacingOccurrences(of: "\n", with: " ")
+            // Strip the embedded "PAGE 12" markers — they leak into snippets and
+            // are noise to the user (the page is shown as a badge instead).
+            snippet = snippet.replacingOccurrences(of: #"\s*PAGE \d+\s*"#, with: " ", options: .regularExpression)
+            snippet = snippet.replacingOccurrences(of: #" {2,}"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespaces)
             if snippetStart > 0 { snippet = "…" + snippet }
             if snippetEnd < textLength { snippet = snippet + "…" }
 
-            results.append(SearchResult(range: found, snippet: snippet))
+            let pageNum = pageForOffset(found.location)
+            let occurrence: Int
+            if let p = pageNum {
+                occurrenceCountPerPage[p, default: 0] += 1
+                occurrence = occurrenceCountPerPage[p]!
+            } else {
+                occurrence = 0
+            }
+
+            results.append(SearchResult(
+                range: found,
+                snippet: snippet,
+                pageNumber: pageNum,
+                pageOccurrence: occurrence
+            ))
 
             searchRange.location = found.location + max(found.length, 1)
             searchRange.length = textLength - searchRange.location
