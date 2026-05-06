@@ -8,10 +8,16 @@ struct SummarySheetView: View {
     let summaryError: String
     let onDone: () -> Void
 
+    @AppStorage(LLMSettings.providerKey) private var aiProviderRaw = LLMProvider.lmStudio.rawValue
+
+    private var providerName: String {
+        (LLMProvider(rawValue: aiProviderRaw) ?? .lmStudio).displayName
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Image(systemName: "apple.intelligence")
+                Image(systemName: "text.bubble")
                     .font(.system(size: 16))
                 Text("Section Summary")
                     .font(.headline)
@@ -35,7 +41,7 @@ struct SummarySheetView: View {
                     Spacer()
                     ProgressView()
                         .scaleEffect(1.2)
-                    Text("Summarizing with Apple Intelligence...")
+                    Text("Summarizing with \(providerName)…")
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                     Spacer()

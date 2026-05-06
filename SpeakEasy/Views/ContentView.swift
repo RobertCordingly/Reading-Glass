@@ -98,7 +98,7 @@ struct ContentView: View {
         return nsText.substring(with: range)
     }
 
-    /// Summarize the current section using Apple Intelligence
+    /// Summarize the current section using the configured AI provider.
     private func summarizeCurrentSection() {
         let sectionText = currentSectionText()
         guard !sectionText.isEmpty else { return }
@@ -467,9 +467,9 @@ struct ContentView: View {
                     ToolbarItem(id: "ai", placement: .automatic) {
                         HStack(spacing: 6) {
                             Button(action: { summarizeCurrentSection() }) {
-                                Label("AI Summary", systemImage: "apple.intelligence")
+                                Label("AI Summary", systemImage: "text.bubble")
                             }
-                            .help("Summarize current section with Apple Intelligence")
+                            .help("Summarize the current section with the configured AI provider")
                             .disabled(displayText.isEmpty)
                             if aiCleanupManager.isCleaningInBackground {
                                 Button(action: { aiCleanupManager.stopCleanup() }) {
