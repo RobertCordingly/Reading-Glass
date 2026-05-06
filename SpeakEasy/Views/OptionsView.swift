@@ -19,6 +19,13 @@ struct OptionsView: View {
     @AppStorage(LLMSettings.apiKeyKey) private var lmStudioAPIKey = ""
     @AppStorage(LLMSettings.temperatureKey) private var lmStudioTemperature = LLMSettings.defaultTemperature
 
+    @AppStorage(CleanupSettings.sentencesPerChunkKey) private var aiSentencesPerChunk = CleanupSettings.defaultSentencesPerChunk
+    @AppStorage(CleanupSettings.windowChunksKey) private var aiWindowChunks = CleanupSettings.defaultWindowChunks
+    @AppStorage(CleanupSettings.contextSentencesKey) private var aiContextSentences = CleanupSettings.defaultContextSentences
+    @AppStorage(CleanupSettings.maxDeviationPercentKey) private var aiMaxDeviationPercent = CleanupSettings.defaultMaxDeviationPercent
+    @AppStorage(CleanupSettings.useTwoPassKey) private var aiUseTwoPass = CleanupSettings.defaultUseTwoPass
+    @AppStorage(CleanupSettings.cleanWholeDocumentKey) private var aiCleanWholeDocument = CleanupSettings.defaultCleanWholeDocument
+
     @State private var availableModels: [String] = []
     @State private var connectionStatus: ConnectionStatus = .idle
     @State private var isCheckingConnection = false
@@ -285,6 +292,8 @@ struct OptionsView: View {
                 }
             }
 
+            cleanupPipelineControls
+
             VStack(alignment: .leading, spacing: 4) {
                 Text("Prompt")
                     .font(.system(size: 13))
@@ -301,6 +310,109 @@ struct OptionsView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
+    }
+
+    /// Per-pipeline knobs: chunk granularity, window, context, acceptance, two-pass.
+    @ViewBuilder
+    private var cleanupPipelineControls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Pipeline Behavior")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .textCase(.uppercase)
+
+            stepperRow(
+                title: "Sentences per chunk",
+                detail: "How many sentences are sent to the LLM in a single request. Larger gives more context per call but uses more tokens.",
+                value: $aiSentencesPerChunk,
+                range: CleanupSettings.sentencesPerChunkRange
+            )
+
+            Toggle(isOn: $aiCleanWholeDocument) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Clean whole document")
+                        .font(.system(size: 13))
+                    Text("Off: only ±N chunks around the cursor are cleaned (fast). On: every chunk is cleaned in one run (slow but thorough).")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            stepperRow(
+                title: "Window (chunks before/after cursor)",
+                detail: "How many chunks on each side of the cursor are cleaned per click. Ignored when 'Clean whole document' is on.",
+                value: $aiWindowChunks,
+                range: CleanupSettings.windowChunksRange,
+                disabled: aiCleanWholeDocument
+            )
+
+            stepperRow(
+                title: "Prior-context sentences",
+                detail: "Number of preceding sentences sent as read-only context. Helps the model handle pronouns and references. Set to 0 to disable.",
+                value: $aiContextSentences,
+                range: CleanupSettings.contextSentencesRange
+            )
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text("Max length deviation")
+                        .font(.system(size: 13))
+                    Spacer()
+                    Text("\(Int(aiMaxDeviationPercent))%")
+                        .font(.system(size: 11))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                Slider(value: $aiMaxDeviationPercent, in: CleanupSettings.deviationPercentRange, step: 5)
+                Text("Reject the LLM's output if its length differs from the original by more than this. Catches paraphrasing and accidental deletions.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Toggle(isOn: $aiUseTwoPass) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Two-pass cleanup")
+                        .font(.system(size: 13))
+                    Text("Run a typo-fix pass before the content cleanup pass. Doubles the number of LLM calls. Disable for faster runs with capable models.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.05)))
+    }
+
+    private func stepperRow(
+        title: String,
+        detail: String,
+        value: Binding<Int>,
+        range: ClosedRange<Int>,
+        disabled: Bool = false
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(title)
+                    .font(.system(size: 13))
+                Spacer()
+                Stepper(value: value, in: range) {
+                    Text("\(value.wrappedValue)")
+                        .font(.system(size: 12))
+                        .monospacedDigit()
+                        .frame(minWidth: 24, alignment: .trailing)
+                }
+                .labelsHidden()
+                .disabled(disabled)
+            }
+            Text(detail)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .opacity(disabled ? 0.5 : 1.0)
     }
 
     private var textProcessingSection: some View {

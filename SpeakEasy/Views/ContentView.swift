@@ -45,6 +45,15 @@ struct ContentView: View {
         """
     @AppStorage("showEditor") private var showEditor = false
     @AppStorage("speedMultiplier") private var speedMultiplier = 2.0
+
+    // AI cleanup behavior — surfaced in Options → AI Cleanup
+    @AppStorage(CleanupSettings.sentencesPerChunkKey) private var aiSentencesPerChunk = CleanupSettings.defaultSentencesPerChunk
+    @AppStorage(CleanupSettings.windowChunksKey) private var aiWindowChunks = CleanupSettings.defaultWindowChunks
+    @AppStorage(CleanupSettings.contextSentencesKey) private var aiContextSentences = CleanupSettings.defaultContextSentences
+    @AppStorage(CleanupSettings.maxDeviationPercentKey) private var aiMaxDeviationPercent = CleanupSettings.defaultMaxDeviationPercent
+    @AppStorage(CleanupSettings.useTwoPassKey) private var aiUseTwoPass = CleanupSettings.defaultUseTwoPass
+    @AppStorage(CleanupSettings.cleanWholeDocumentKey) private var aiCleanWholeDocument = CleanupSettings.defaultCleanWholeDocument
+
     @State private var hasPendingCleanupUpdates = false
     @State private var currentPDFPage: Int = 0
     @State private var totalPDFPages: Int = 0
@@ -612,6 +621,13 @@ struct ContentView: View {
             .onChange(of: ignoreBeforeAbstract) { _, _ in reprocessText() }
             .onChange(of: skipCitations) { _, _ in reprocessText() }
             .onChange(of: removeFiguresAndTables, handleAICleanupToggle)
+            .onChange(of: aiSentencesPerChunk) { _, _ in
+                // Chunk indices are tied to the grouping size — existing overrides
+                // would land in the wrong place. Easiest correct behaviour: clear them.
+                aiCleanupManager.stopCleanup()
+                aiCleanupManager.clear()
+                buildDisplayText()
+            }
             .onChange(of: replaceParentheses) { _, _ in reprocessText() }
             .onChange(of: speakGreekLetters) { _, _ in reprocessText() }
             .onChange(of: speakMathSymbols) { _, _ in reprocessText() }
@@ -929,7 +945,7 @@ struct ContentView: View {
             return
         }
 
-        let chunks = AICleanupManager.makeChunks(from: text)
+        let chunks = AICleanupManager.makeChunks(from: text, sentencesPerChunk: aiSentencesPerChunk)
         let (result, offsets) = AICleanupManager.buildDisplayTextFromChunks(
             cleanedText: text,
             aiCleanedChunks: aiCleanupManager.aiCleanedChunks,
@@ -948,11 +964,21 @@ struct ContentView: View {
     private func startChunkBasedAICleanup() {
         guard removeFiguresAndTables else { return }
 
+        let config = AICleanupConfig(
+            sentencesPerChunk: aiSentencesPerChunk,
+            windowChunks: aiWindowChunks,
+            contextSentences: aiContextSentences,
+            maxDeviationPercent: aiMaxDeviationPercent,
+            useTwoPass: aiUseTwoPass,
+            cleanWholeDocument: aiCleanWholeDocument
+        )
+
         aiCleanupManager.startChunkBasedCleanup(
             cleanedText: cleanedText,
             parsedSections: parsedSections,
             aiCleanupPrompt: aiCleanupPrompt,
             cursorUTF16: speechManager.cursorUTF16,
+            config: config,
             onDisplayTextUpdate: { newText, newOffsets in
                 if speechManager.isPlaying {
                     hasPendingCleanupUpdates = true
