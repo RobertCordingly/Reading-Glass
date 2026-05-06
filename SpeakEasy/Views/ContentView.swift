@@ -385,6 +385,7 @@ struct ContentView: View {
                         cursorUTF16: speechManager.cursorUTF16,
                         cursorLengthUTF16: speechManager.cursorLengthUTF16,
                         isPlaying: speechManager.isPlaying,
+                        cleaningRange: aiCleanupManager.cleaningRangeInDisplay,
                         onWordClicked: { utf16Offset in
                             jumpCursor(to: utf16Offset)
                         }

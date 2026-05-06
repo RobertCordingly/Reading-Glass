@@ -8,6 +8,9 @@ struct ReaderTextView: NSViewRepresentable {
     let cursorUTF16: Int
     let cursorLengthUTF16: Int
     var isPlaying: Bool = false
+    /// UTF-16 range of the chunk the AI cleanup pipeline is currently rewriting.
+    /// `nil` when no cleanup is in flight. Drawn as a soft yellow highlight.
+    var cleaningRange: NSRange? = nil
     let onWordClicked: (Int) -> Void  // passes UTF-16 offset of clicked word start
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -79,6 +82,11 @@ struct ReaderTextView: NSViewRepresentable {
         Coordinator(text: text, onWordClicked: onWordClicked)
     }
 
+    /// Soft yellow highlight (highlighter-pen feel) drawn behind the chunk currently
+    /// being processed by AI cleanup. Distinct from the speech cursor's accent
+    /// foreground so the two can coexist on overlapping text.
+    private static let cleaningHighlightColor: NSColor = NSColor.systemYellow.withAlphaComponent(0.28)
+
     private func buildAttributedString() -> NSAttributedString {
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.alignment = .justified
@@ -92,20 +100,8 @@ struct ReaderTextView: NSViewRepresentable {
             ]
         )
 
-        // Apply highlight to current word
-        let utf16 = text.utf16
-        let start = min(cursorUTF16, utf16.count)
-        let length = min(cursorLengthUTF16, utf16.count - start)
-
-        if length > 0 && start < utf16.count {
-            attributed.addAttribute(.foregroundColor, value: NSColor.controlAccentColor, range: NSRange(location: start, length: length))
-        } else if start < utf16.count {
-            // No length — highlight the word at cursor
-            let wordRange = findWordRange(at: start)
-            if wordRange.length > 0 {
-                attributed.addAttribute(.foregroundColor, value: NSColor.controlAccentColor, range: wordRange)
-            }
-        }
+        applyCleaningHighlight(to: attributed)
+        applySpeechHighlight(to: attributed)
 
         return attributed
     }
@@ -116,7 +112,31 @@ struct ReaderTextView: NSViewRepresentable {
 
         storage.beginEditing()
         storage.addAttribute(.foregroundColor, value: NSColor.textColor, range: fullRange)
+        storage.removeAttribute(.backgroundColor, range: fullRange)
 
+        applyCleaningHighlight(to: storage)
+        applySpeechHighlight(to: storage)
+
+        storage.endEditing()
+    }
+
+    /// Clamp an NSRange against the current text so it never points past the end —
+    /// the manager's range is computed from the underlying displayText, which can be
+    /// a few characters shorter than the padded `text` we render with trailing newlines.
+    private func clampedCleaningRange() -> NSRange? {
+        guard let range = cleaningRange, range.length > 0 else { return nil }
+        let total = (text as NSString).length
+        guard range.location < total else { return nil }
+        let length = min(range.length, total - range.location)
+        return NSRange(location: range.location, length: length)
+    }
+
+    private func applyCleaningHighlight(to storage: NSMutableAttributedString) {
+        guard let range = clampedCleaningRange() else { return }
+        storage.addAttribute(.backgroundColor, value: Self.cleaningHighlightColor, range: range)
+    }
+
+    private func applySpeechHighlight(to storage: NSMutableAttributedString) {
         let utf16 = text.utf16
         let start = min(cursorUTF16, utf16.count)
         let length = min(cursorLengthUTF16, utf16.count - start)
@@ -129,7 +149,6 @@ struct ReaderTextView: NSViewRepresentable {
                 storage.addAttribute(.foregroundColor, value: NSColor.controlAccentColor, range: wordRange)
             }
         }
-        storage.endEditing()
     }
 
     private func findWordRange(at utf16Offset: Int) -> NSRange {

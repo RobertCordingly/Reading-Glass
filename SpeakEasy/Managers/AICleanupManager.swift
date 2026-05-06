@@ -362,6 +362,11 @@ final class AICleanupManager: ObservableObject {
     @Published var backgroundCleanProgress: Double = 0
     @Published var backgroundCleanStatus = ""
 
+    /// UTF-16 range, in `displayText` coordinates, of the chunk currently being
+    /// processed by the LLM. `nil` when no chunk is in flight. The reader view uses
+    /// this to draw a soft highlight so the user can see what cleanup is touching.
+    @Published var cleaningRangeInDisplay: NSRange? = nil
+
     private var cleanupTask: Task<Void, Never>?
 
     private let typoFixPrompt = """
@@ -373,6 +378,7 @@ final class AICleanupManager: ObservableObject {
     func clear() {
         aiCleanedChunks = [:]
         cleanupLog = []
+        cleaningRangeInDisplay = nil
     }
 
     /// Reverts a single cleanup log entry (removes its chunk override and log entry).
@@ -500,6 +506,15 @@ final class AICleanupManager: ObservableObject {
                     let sectionTitle = sectionTitlesByChunk[chunkIdx] ?? "Chunk \(chunkIdx + 1)"
                     let originalLength = chunkText.count
 
+                    // Tell the reader view which range it's currently watching the
+                    // model rewrite. Computed against the *current* override state so
+                    // it lines up with what's on screen.
+                    self.cleaningRangeInDisplay = Self.displayRange(
+                        forChunk: chunkIdx,
+                        chunks: chunks,
+                        aiCleanedChunks: self.aiCleanedChunks
+                    )
+
                     // Build context = N sentences immediately preceding this chunk.
                     let context = Self.buildContext(
                         for: chunkIdx,
@@ -539,6 +554,11 @@ final class AICleanupManager: ObservableObject {
                         maxDeviationPercent: maxDeviationPercent
                     )
 
+                    // Clear the highlight before mutating overrides — once the override
+                    // is applied the chunk's display range shifts (different length),
+                    // so the previously published range would point at stale text.
+                    self.cleaningRangeInDisplay = nil
+
                     if accept {
                         self.aiCleanedChunks[chunkIdx] = afterCleanup
                         self.cleanupLog.append(CleanupLogEntry(
@@ -559,15 +579,18 @@ final class AICleanupManager: ObservableObject {
                     }
                 }
 
+                self.cleaningRangeInDisplay = nil
                 self.backgroundCleanProgress = 1.0
                 self.backgroundCleanStatus = ""
                 self.isCleaningInBackground = false
                 self.cleanupTask = nil
             } catch is CancellationError {
+                self.cleaningRangeInDisplay = nil
                 self.backgroundCleanStatus = "Cancelled"
                 self.isCleaningInBackground = false
                 self.cleanupTask = nil
             } catch {
+                self.cleaningRangeInDisplay = nil
                 self.backgroundCleanStatus = (error as? AICleanupError)?.errorDescription ?? error.localizedDescription
                 self.isCleaningInBackground = false
                 self.cleanupTask = nil
@@ -695,6 +718,40 @@ final class AICleanupManager: ObservableObject {
         let modLen = modified.count
         let deviation = abs(Double(modLen - origLen)) / Double(origLen) * 100.0
         return deviation <= maxDeviationPercent
+    }
+
+    /// Returns the UTF-16 range, in `displayText` coordinates, occupied by the chunk
+    /// at `chunkIdx`, using whatever overrides exist in `aiCleanedChunks` for chunks
+    /// that come *before* it. The chunk at `chunkIdx` itself is treated as
+    /// not-yet-overridden (its length is the original chunk length), which is the
+    /// correct invariant during cleanup — the override is applied only after the
+    /// LLM call finishes.
+    static func displayRange(
+        forChunk chunkIdx: Int,
+        chunks: [(start: Int, end: Int)],
+        aiCleanedChunks: [Int: String]
+    ) -> NSRange {
+        guard chunkIdx >= 0, chunkIdx < chunks.count else {
+            return NSRange(location: 0, length: 0)
+        }
+        var pos = 0
+        for i in 0..<chunkIdx {
+            if let override = aiCleanedChunks[i] {
+                pos += (override as NSString).length
+            } else {
+                pos += chunks[i].end - chunks[i].start
+            }
+        }
+        // For chunks where there's already an override (e.g. the user re-runs cleanup
+        // and the chunk somehow re-enters the loop), still highlight the overridden
+        // span — that's what's on screen.
+        let length: Int
+        if let override = aiCleanedChunks[chunkIdx] {
+            length = (override as NSString).length
+        } else {
+            length = chunks[chunkIdx].end - chunks[chunkIdx].start
+        }
+        return NSRange(location: pos, length: length)
     }
 
     /// Builds display text from cleanedText and AI-cleaned chunk overrides. Returns (displayText, sectionOffsets).
