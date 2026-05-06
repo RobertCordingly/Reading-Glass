@@ -2,7 +2,250 @@ import Foundation
 import FoundationModels
 import SwiftUI
 
-/// Manages AI cleanup (chunk-based text cleaning) and summarization using Apple Intelligence.
+// MARK: - LLM Provider Configuration
+
+/// Which backend handles AI summarization and cleanup.
+enum LLMProvider: String, CaseIterable, Identifiable {
+    case appleIntelligence = "apple"
+    case lmStudio = "lmstudio"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .appleIntelligence: return "Apple Intelligence"
+        case .lmStudio: return "LM Studio (Local Endpoint)"
+        }
+    }
+}
+
+/// User-defaults–backed read access for AI provider settings, used outside the SwiftUI
+/// AppStorage layer (e.g. inside background tasks). Keys mirror the @AppStorage keys.
+enum LLMSettings {
+    static let providerKey = "aiProvider"
+    static let baseURLKey = "lmStudioBaseURL"
+    static let modelKey = "lmStudioModel"
+    static let apiKeyKey = "lmStudioAPIKey"
+    static let temperatureKey = "lmStudioTemperature"
+
+    static let defaultBaseURL = "http://localhost:1234/v1"
+    static let defaultTemperature = 0.2
+
+    static var provider: LLMProvider {
+        let raw = UserDefaults.standard.string(forKey: providerKey) ?? LLMProvider.lmStudio.rawValue
+        return LLMProvider(rawValue: raw) ?? .lmStudio
+    }
+
+    static var lmStudioBaseURL: String {
+        let stored = UserDefaults.standard.string(forKey: baseURLKey) ?? defaultBaseURL
+        return stored.isEmpty ? defaultBaseURL : stored
+    }
+
+    static var lmStudioModel: String {
+        UserDefaults.standard.string(forKey: modelKey) ?? ""
+    }
+
+    static var lmStudioAPIKey: String {
+        UserDefaults.standard.string(forKey: apiKeyKey) ?? ""
+    }
+
+    static var lmStudioTemperature: Double {
+        let raw = UserDefaults.standard.object(forKey: temperatureKey) as? Double
+        return raw ?? defaultTemperature
+    }
+}
+
+// MARK: - LLM Backend Protocol
+
+/// A unified interface over local LLM providers (Apple Intelligence and LM Studio).
+protocol LLMBackend: Sendable {
+    /// Verifies the backend is reachable and ready. Throws AICleanupError on failure.
+    func checkAvailability() async throws
+
+    /// Sends a single non-streaming request and returns the full response text.
+    func respond(instructions: String, userMessage: String) async throws -> String
+}
+
+// MARK: - Apple Intelligence Backend
+
+struct AppleIntelligenceBackend: LLMBackend {
+    func checkAvailability() async throws {
+        let model = SystemLanguageModel.default
+        switch model.availability {
+        case .available:
+            return
+        case .unavailable(.deviceNotEligible):
+            throw AICleanupError.deviceNotEligible
+        case .unavailable(.appleIntelligenceNotEnabled):
+            throw AICleanupError.appleIntelligenceNotEnabled
+        case .unavailable(.modelNotReady):
+            throw AICleanupError.modelNotReady
+        case .unavailable:
+            throw AICleanupError.unavailable
+        }
+    }
+
+    func respond(instructions: String, userMessage: String) async throws -> String {
+        try await checkAvailability()
+        let trimmed = instructions.trimmingCharacters(in: .whitespacesAndNewlines)
+        let session = LanguageModelSession(instructions: trimmed.isEmpty ? "Return the text unchanged." : trimmed)
+        let response = try await session.respond(to: userMessage)
+        return response.content
+    }
+}
+
+// MARK: - LM Studio Backend (OpenAI-compatible)
+
+struct LMStudioBackend: LLMBackend {
+    let baseURL: String
+    let model: String
+    let apiKey: String
+    let temperature: Double
+
+    init(
+        baseURL: String = LLMSettings.lmStudioBaseURL,
+        model: String = LLMSettings.lmStudioModel,
+        apiKey: String = LLMSettings.lmStudioAPIKey,
+        temperature: Double = LLMSettings.lmStudioTemperature
+    ) {
+        self.baseURL = LMStudioBackend.normalize(baseURL)
+        self.model = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.apiKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.temperature = temperature
+    }
+
+    /// Strips trailing slashes and obvious endpoint paths a user might paste in.
+    private static func normalize(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        while s.hasSuffix("/") { s.removeLast() }
+        for suffix in ["/chat/completions", "/completions"] {
+            if s.hasSuffix(suffix) {
+                s = String(s.dropLast(suffix.count))
+                break
+            }
+        }
+        if s.isEmpty { s = LLMSettings.defaultBaseURL }
+        return s
+    }
+
+    func checkAvailability() async throws {
+        guard let url = URL(string: baseURL + "/models") else {
+            throw AICleanupError.invalidEndpoint
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 5
+        if !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw AICleanupError.lmStudioUnreachable
+            }
+            if !(200..<300).contains(http.statusCode) {
+                throw AICleanupError.lmStudioBadStatus(http.statusCode)
+            }
+        } catch let err as AICleanupError {
+            throw err
+        } catch {
+            throw AICleanupError.lmStudioUnreachable
+        }
+    }
+
+    /// Lists the models currently loaded in LM Studio. Used by the settings sheet to
+    /// populate a picker so the user doesn't need to type a model identifier.
+    func listModels() async throws -> [String] {
+        guard let url = URL(string: baseURL + "/models") else {
+            throw AICleanupError.invalidEndpoint
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 5
+        if !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw AICleanupError.lmStudioUnreachable
+        }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let arr = json["data"] as? [[String: Any]] else {
+            return []
+        }
+        return arr.compactMap { $0["id"] as? String }.sorted()
+    }
+
+    func respond(instructions: String, userMessage: String) async throws -> String {
+        let trimmedInstructions = instructions.trimmingCharacters(in: .whitespacesAndNewlines)
+        let systemPrompt = trimmedInstructions.isEmpty ? "Return the text unchanged." : trimmedInstructions
+
+        guard let url = URL(string: baseURL + "/chat/completions") else {
+            throw AICleanupError.invalidEndpoint
+        }
+
+        var body: [String: Any] = [
+            "messages": [
+                ["role": "system", "content": systemPrompt],
+                ["role": "user", "content": userMessage]
+            ],
+            "temperature": temperature,
+            "stream": false
+        ]
+        if !model.isEmpty {
+            body["model"] = model
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        request.timeoutInterval = 300
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(for: request)
+        } catch {
+            throw AICleanupError.lmStudioUnreachable
+        }
+
+        guard let http = response as? HTTPURLResponse else {
+            throw AICleanupError.lmStudioUnreachable
+        }
+        if !(200..<300).contains(http.statusCode) {
+            let bodyText = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .prefix(200) ?? ""
+            throw AICleanupError.lmStudioRequestFailed(http.statusCode, String(bodyText))
+        }
+
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = json["choices"] as? [[String: Any]],
+              let first = choices.first,
+              let message = first["message"] as? [String: Any],
+              let content = message["content"] as? String else {
+            throw AICleanupError.lmStudioBadResponse
+        }
+        return content
+    }
+}
+
+// MARK: - Backend Factory
+
+enum LLMBackendFactory {
+    /// Builds the backend currently selected in user defaults.
+    static func current() -> LLMBackend {
+        switch LLMSettings.provider {
+        case .appleIntelligence: return AppleIntelligenceBackend()
+        case .lmStudio: return LMStudioBackend()
+        }
+    }
+}
+
+/// Manages AI cleanup (chunk-based text cleaning) and summarization through a
+/// pluggable backend (Apple Intelligence or a local LM Studio endpoint).
 @MainActor
 final class AICleanupManager: ObservableObject {
     @Published var aiCleanedChunks: [Int: String] = [:]
@@ -35,27 +278,13 @@ final class AICleanupManager: ObservableObject {
         cleanupGeneration += 1
     }
 
-    /// Summarizes text using Apple Intelligence.
-    /// - Returns: The summary string, or throws with an error message for UI display.
+    /// Summarizes text using the configured backend.
+    /// - Returns: The summary string, or throws an `AICleanupError` for UI display.
     func summarize(text: String) async throws -> String {
-        let model = SystemLanguageModel.default
+        guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { return "" }
 
-        switch model.availability {
-        case .available:
-            break
-        case .unavailable(.deviceNotEligible):
-            throw AICleanupError.deviceNotEligible
-        case .unavailable(.appleIntelligenceNotEnabled):
-            throw AICleanupError.appleIntelligenceNotEnabled
-        case .unavailable(.modelNotReady):
-            throw AICleanupError.modelNotReady
-        case .unavailable:
-            throw AICleanupError.unavailable
-        }
-
-        guard !text.trimmingCharacters(in: .whitespaces).isEmpty else {
-            return ""
-        }
+        let backend = LLMBackendFactory.current()
+        try await backend.checkAvailability()
 
         let instructions = """
             You are a helpful research assistant. Provide a concise and comprehensive \
@@ -63,9 +292,7 @@ final class AICleanupManager: ObservableObject {
             intended meaning accurately. Do not add any information not in the original \
             text. Keep the summary focused and appropriately brief.
             """
-        let session = LanguageModelSession(instructions: instructions)
-        let response = try await session.respond(to: text)
-        return response.content
+        return try await backend.respond(instructions: instructions, userMessage: text)
     }
 
     /// Runs chunk-based AI cleanup on chunks around the cursor position.
@@ -83,8 +310,7 @@ final class AICleanupManager: ObservableObject {
         cursorUTF16: Int,
         onDisplayTextUpdate: @escaping (String, [Int]) -> Void
     ) {
-        let model = SystemLanguageModel.default
-        guard case .available = model.availability else { return }
+        let backend = LLMBackendFactory.current()
 
         let currentGeneration = cleanupGeneration
         let nsText = cleanedText as NSString
@@ -104,7 +330,7 @@ final class AICleanupManager: ObservableObject {
 
         isCleaningInBackground = true
         backgroundCleanProgress = 0
-        backgroundCleanStatus = "Typos 1/\(indicesToClean.count)..."
+        backgroundCleanStatus = "Connecting..."
 
         let sectionTitlesByChunk: [Int: String] = Dictionary(uniqueKeysWithValues: indicesToClean.map { idx in
             let start = chunks[idx].start
@@ -119,6 +345,18 @@ final class AICleanupManager: ObservableObject {
         })
 
         Task {
+            do {
+                try await backend.checkAvailability()
+            } catch {
+                let message = (error as? AICleanupError)?.errorDescription ?? error.localizedDescription
+                backgroundCleanStatus = message
+                backgroundCleanProgress = 0
+                isCleaningInBackground = false
+                return
+            }
+
+            backgroundCleanStatus = "Typos 1/\(indicesToClean.count)..."
+
             for (step, chunkIdx) in indicesToClean.enumerated() {
                 if cleanupGeneration != currentGeneration {
                     isCleaningInBackground = false
@@ -134,14 +372,14 @@ final class AICleanupManager: ObservableObject {
                 backgroundCleanProgress = (Double(step) * 2) / Double(indicesToClean.count * 2)
                 backgroundCleanStatus = "Typos \(step + 1)/\(indicesToClean.count)..."
 
-                let afterTypos = await aiCleanSection(chunkText, prompt: typoFixPrompt)
+                let afterTypos = await aiCleanSection(chunkText, prompt: typoFixPrompt, backend: backend)
                 if cleanupGeneration != currentGeneration { return }
 
                 // Pass 2: Content cleanup
                 backgroundCleanProgress = (Double(step) * 2 + 1) / Double(indicesToClean.count * 2)
                 backgroundCleanStatus = "Cleanup \(step + 1)/\(indicesToClean.count)..."
 
-                let afterCleanup = await aiCleanSection(afterTypos, prompt: aiCleanupPrompt)
+                let afterCleanup = await aiCleanSection(afterTypos, prompt: aiCleanupPrompt, backend: backend)
                 if cleanupGeneration != currentGeneration { return }
 
                 let hasMeaningfulChange = !Self.isWhitespaceOnlyChange(original: chunkText, modified: afterCleanup)
@@ -173,16 +411,10 @@ final class AICleanupManager: ObservableObject {
         }
     }
 
-    private func aiCleanSection(_ text: String, prompt: String) async -> String {
-        let model = SystemLanguageModel.default
-        guard case .available = model.availability else { return text }
+    private func aiCleanSection(_ text: String, prompt: String, backend: LLMBackend) async -> String {
         guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { return text }
-
         do {
-            let instructions = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-            let session = LanguageModelSession(instructions: instructions.isEmpty ? "Return the text unchanged." : instructions)
-            let response = try await session.respond(to: text)
-            return response.content
+            return try await backend.respond(instructions: prompt, userMessage: text)
         } catch {
             return text
         }
@@ -265,17 +497,39 @@ final class AICleanupManager: ObservableObject {
 }
 
 enum AICleanupError: LocalizedError {
+    // Apple Intelligence
     case deviceNotEligible
     case appleIntelligenceNotEnabled
     case modelNotReady
     case unavailable
 
+    // LM Studio
+    case invalidEndpoint
+    case lmStudioUnreachable
+    case lmStudioBadStatus(Int)
+    case lmStudioRequestFailed(Int, String)
+    case lmStudioBadResponse
+
     var errorDescription: String? {
         switch self {
-        case .deviceNotEligible: return "Apple Intelligence is not available on this device."
-        case .appleIntelligenceNotEnabled: return "Apple Intelligence is available but not enabled. Enable it in System Settings."
-        case .modelNotReady: return "The language model isn't ready yet. Please try again later."
-        case .unavailable: return "Apple Intelligence is unavailable."
+        case .deviceNotEligible:
+            return "Apple Intelligence is not available on this device."
+        case .appleIntelligenceNotEnabled:
+            return "Apple Intelligence is available but not enabled. Enable it in System Settings."
+        case .modelNotReady:
+            return "The Apple Intelligence model isn't ready yet. Please try again later."
+        case .unavailable:
+            return "Apple Intelligence is unavailable."
+        case .invalidEndpoint:
+            return "The LM Studio endpoint URL is not valid."
+        case .lmStudioUnreachable:
+            return "Could not reach LM Studio. Make sure it's running and the server is started."
+        case .lmStudioBadStatus(let code):
+            return "LM Studio returned HTTP \(code) when checking availability."
+        case .lmStudioRequestFailed(let code, let body):
+            return body.isEmpty ? "LM Studio request failed (HTTP \(code))." : "LM Studio request failed (HTTP \(code)): \(body)"
+        case .lmStudioBadResponse:
+            return "LM Studio returned an unexpected response format."
         }
     }
 }

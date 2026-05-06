@@ -1,7 +1,6 @@
 import PDFKit
 import AppKit
 import SwiftUI
-import FoundationModels
 
 /// Wraps PDFKit's PDFThumbnailView, linked to a PDFView instance.
 struct PDFThumbnailStrip: NSViewRepresentable {
