@@ -23,6 +23,10 @@ struct ContentView: View {
     /// coordinates. Built once per search so each thumbnail row can quickly look up
     /// "the Nth match on page P". Indexed by 1-based page number.
     @State private var pdfMatchBoundsByPage: [Int: [CGRect]] = [:]
+    /// Incremented every time the user clicks a search result. Both the reader and
+    /// the PDF view watch this and force a scroll-into-view when it changes, so
+    /// jumps work even when playback is stopped.
+    @State private var searchJumpVersion: Int = 0
     @State private var parsedSections: [SectionItem] = []
     @State private var showPronunciationEditor = false
     @State private var showOptionsEditor = false
@@ -282,6 +286,7 @@ struct ContentView: View {
                         highlightText: pdfHighlightText,
                         highlightPage: pdfHighlightPage,
                         isPlaying: speechManager.isPlaying,
+                        forceScrollVersion: searchJumpVersion,
                         onWordSelected: { word, _, _ in
                             searchQuery = word
                             performSearch()
@@ -390,6 +395,7 @@ struct ContentView: View {
                         cursorLengthUTF16: speechManager.cursorLengthUTF16,
                         isPlaying: speechManager.isPlaying,
                         cleaningRange: aiCleanupManager.cleaningRangeInDisplay,
+                        scrollVersion: searchJumpVersion,
                         onWordClicked: { utf16Offset in
                             jumpCursor(to: utf16Offset)
                         }
@@ -784,7 +790,10 @@ struct ContentView: View {
             if snippetStart > 0 { snippet = "…" + snippet }
             if snippetEnd < textLength { snippet = snippet + "…" }
 
-            let pageNum = pageForOffset(found.location)
+            // pageForOffset returns the literal PAGE marker number, which is 0-based
+            // (PAGE 0 == first page). Convert to 1-based here so the badge reads
+            // naturally and lookups against pdfMatchBoundsByPage line up.
+            let pageNum: Int? = pageForOffset(found.location).map { $0 + 1 }
             let occurrence: Int
             if let p = pageNum {
                 occurrenceCountPerPage[p, default: 0] += 1
@@ -823,6 +832,9 @@ struct ContentView: View {
         speechManager.cursorLengthUTF16 = result.range.length
 
         lastSearchResult = result.range
+        // Bump the version so both reader and PDF views know to scroll the new
+        // selection into view even though playback is stopped.
+        searchJumpVersion &+= 1
 
         sidebarMode = .reader
     }

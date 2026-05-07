@@ -12,6 +12,9 @@ struct ReaderTextView: UIViewRepresentable {
     /// UTF-16 range of the chunk the AI cleanup pipeline is currently rewriting.
     /// `nil` when no cleanup is in flight. Drawn as a soft yellow highlight.
     var cleaningRange: NSRange? = nil
+    /// Bumped by the parent every time the user picks a search result; forces a
+    /// scroll-into-view even when playback is stopped.
+    var scrollVersion: Int = 0
     let onWordClicked: (Int) -> Void
 
     func makeUIView(context: Context) -> UITextView {
@@ -37,12 +40,14 @@ struct ReaderTextView: UIViewRepresentable {
             updateHighlighting(textView)
         }
 
-        if isPlaying {
+        let scrollRequested = context.coordinator.lastScrollVersion != scrollVersion
+        if isPlaying || scrollRequested {
             let range = currentHighlightNSRange()
             if range.length > 0, range.location + range.length <= (textView.text as NSString).length {
                 textView.scrollRangeToVisible(range)
             }
         }
+        context.coordinator.lastScrollVersion = scrollVersion
 
         context.coordinator.text = text
         context.coordinator.onWordClicked = onWordClicked
@@ -156,6 +161,7 @@ struct ReaderTextView: UIViewRepresentable {
     class Coordinator: NSObject {
         var text: String
         var onWordClicked: (Int) -> Void
+        var lastScrollVersion: Int = 0
 
         init(text: String, onWordClicked: @escaping (Int) -> Void) {
             self.text = text

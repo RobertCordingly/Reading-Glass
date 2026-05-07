@@ -11,6 +11,10 @@ struct ReaderTextView: NSViewRepresentable {
     /// UTF-16 range of the chunk the AI cleanup pipeline is currently rewriting.
     /// `nil` when no cleanup is in flight. Drawn as a soft yellow highlight.
     var cleaningRange: NSRange? = nil
+    /// Bumped by the parent every time the user picks a search result. The view
+    /// scrolls the cursor into view whenever this changes, even if `isPlaying` is
+    /// false (otherwise the auto-scroll path is gated to playback only).
+    var scrollVersion: Int = 0
     let onWordClicked: (Int) -> Void  // passes UTF-16 offset of clicked word start
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -52,13 +56,17 @@ struct ReaderTextView: NSViewRepresentable {
             updateHighlighting(textView)
         }
 
-        // Scroll to keep the highlighted word visible (only while reading)
-        if isPlaying {
+        // Scroll to keep the highlighted word visible. We scroll while reading
+        // (follow-the-cursor), and also exactly once when the parent bumps
+        // scrollVersion (e.g. after a search-result click).
+        let scrollRequested = context.coordinator.lastScrollVersion != scrollVersion
+        if isPlaying || scrollRequested {
             let highlightRange = currentHighlightNSRange()
             if highlightRange.length > 0 && highlightRange.location < (textView.string as NSString).length {
                 textView.scrollRangeToVisible(highlightRange)
             }
         }
+        context.coordinator.lastScrollVersion = scrollVersion
 
         context.coordinator.text = text
         context.coordinator.onWordClicked = onWordClicked
@@ -181,6 +189,9 @@ struct ReaderTextView: NSViewRepresentable {
     class Coordinator: NSObject, NSTextViewDelegate {
         var text: String
         var onWordClicked: (Int) -> Void
+        /// Highest scroll-version we've already serviced. Sentinel so the very first
+        /// updateNSView doesn't race-scroll before the user has done anything.
+        var lastScrollVersion: Int = 0
 
         init(text: String, onWordClicked: @escaping (Int) -> Void) {
             self.text = text
