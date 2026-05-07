@@ -46,6 +46,8 @@ struct PDFKitView: UIViewRepresentable {
     let highlightText: String
     let highlightPage: Int?
     var isPlaying: Bool = false
+    /// Bumped by the parent on each search-result click; see PDFComponents.swift.
+    var forceScrollVersion: Int = 0
     let onWordSelected: (String, Int, Int) -> Void
     let onPDFViewReady: (PDFView) -> Void
     var onPageChange: ((Int, Int) -> Void)?
@@ -164,7 +166,9 @@ struct PDFKitView: UIViewRepresentable {
         coord.lastPDFPage = match.pages.first
         coord.currentHighlightMatch = match
 
-        if isPlaying, let page = match.pages.first {
+        let forceScroll = coord.lastForcedScrollVersion != forceScrollVersion
+        coord.lastForcedScrollVersion = forceScrollVersion
+        if (isPlaying || forceScroll), let page = match.pages.first {
             let pageBounds = match.bounds(for: page)
             let viewRect = pdfView.convert(pageBounds, from: page)
             let visibleRect = pdfView.bounds.insetBy(dx: 0, dy: 40)
@@ -224,6 +228,8 @@ struct PDFKitView: UIViewRepresentable {
         static let shortJumpThreshold = 3
         static let longJumpThreshold = 10
         var bypassStabilization = false
+        /// Highest forceScrollVersion we've already serviced.
+        var lastForcedScrollVersion: Int = 0
 
         init(onWordSelected: @escaping (String, Int, Int) -> Void, onPageChange: ((Int, Int) -> Void)?) {
             self.onWordSelected = onWordSelected

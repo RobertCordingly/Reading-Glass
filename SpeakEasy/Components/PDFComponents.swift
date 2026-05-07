@@ -78,6 +78,10 @@ struct PDFKitView: NSViewRepresentable {
     let highlightText: String
     let highlightPage: Int?
     var isPlaying: Bool = false
+    /// Bumped by the parent on each search-result click. The view scrolls to the
+    /// active highlight whenever this value changes, so jumps work outside of
+    /// playback (the auto-scroll path is otherwise gated on `isPlaying`).
+    var forceScrollVersion: Int = 0
     let onWordSelected: (String, Int, Int) -> Void  // (word, pageIndex, occurrence)
     let onPDFViewReady: (PDFView) -> Void
     var onPageChange: ((Int, Int) -> Void)?  // (currentPage, totalPages)
@@ -199,8 +203,11 @@ struct PDFKitView: NSViewRepresentable {
         coord.lastPDFPage = match.pages.first
         coord.currentHighlightMatch = match
 
-        // Only auto-scroll while reading
-        if isPlaying, let page = match.pages.first {
+        // Auto-scroll while reading; also scroll once whenever the parent bumps
+        // forceScrollVersion (e.g. after a search-result click).
+        let forceScroll = coord.lastForcedScrollVersion != forceScrollVersion
+        coord.lastForcedScrollVersion = forceScrollVersion
+        if (isPlaying || forceScroll), let page = match.pages.first {
             let pageBounds = match.bounds(for: page)
             let viewRect = pdfView.convert(pageBounds, from: page)
             let visibleRect = pdfView.bounds.insetBy(dx: 0, dy: 40)
@@ -264,6 +271,8 @@ struct PDFKitView: NSViewRepresentable {
         static let shortJumpThreshold = 3   // same page or 1 page away
         static let longJumpThreshold = 10   // more than 1 page away
         var bypassStabilization = false  // set true on manual clicks to skip buffering
+        /// Highest forceScrollVersion we've already serviced — see `PDFKitView`.
+        var lastForcedScrollVersion: Int = 0
         private var zoomObserver: NSObjectProtocol?
 
         init(onWordSelected: @escaping (String, Int, Int) -> Void, onPageChange: ((Int, Int) -> Void)?) {
