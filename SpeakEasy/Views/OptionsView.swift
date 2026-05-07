@@ -393,19 +393,19 @@ struct OptionsView: View {
         range: ClosedRange<Int>,
         disabled: Bool = false
     ) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text(title)
                     .font(.system(size: 13))
                 Spacer()
-                Stepper(value: value, in: range) {
-                    Text("\(value.wrappedValue)")
-                        .font(.system(size: 12))
-                        .monospacedDigit()
-                        .frame(minWidth: 24, alignment: .trailing)
-                }
-                .labelsHidden()
-                .disabled(disabled)
+                Text("\(value.wrappedValue)")
+                    .font(.system(size: 11))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                Stepper("", value: value, in: range)
+                    .labelsHidden()
+                    .fixedSize()
+                    .disabled(disabled)
             }
             Text(detail)
                 .font(.system(size: 11))
