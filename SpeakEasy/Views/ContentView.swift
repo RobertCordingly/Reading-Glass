@@ -59,7 +59,6 @@ struct ContentView: View {
     @AppStorage(CleanupSettings.windowChunksKey) private var aiWindowChunks = CleanupSettings.defaultWindowChunks
     @AppStorage(CleanupSettings.contextSentencesKey) private var aiContextSentences = CleanupSettings.defaultContextSentences
     @AppStorage(CleanupSettings.maxDeviationPercentKey) private var aiMaxDeviationPercent = CleanupSettings.defaultMaxDeviationPercent
-    @AppStorage(CleanupSettings.useTwoPassKey) private var aiUseTwoPass = CleanupSettings.defaultUseTwoPass
     @AppStorage(CleanupSettings.cleanWholeDocumentKey) private var aiCleanWholeDocument = CleanupSettings.defaultCleanWholeDocument
 
     @State private var hasPendingCleanupUpdates = false
@@ -395,6 +394,7 @@ struct ContentView: View {
                         cursorLengthUTF16: speechManager.cursorLengthUTF16,
                         isPlaying: speechManager.isPlaying,
                         cleaningRange: aiCleanupManager.cleaningRangeInDisplay,
+                        cleaningContextRange: aiCleanupManager.cleaningContextRangeInDisplay,
                         scrollVersion: searchJumpVersion,
                         onWordClicked: { utf16Offset in
                             jumpCursor(to: utf16Offset)
@@ -1031,7 +1031,6 @@ struct ContentView: View {
             windowChunks: aiWindowChunks,
             contextSentences: aiContextSentences,
             maxDeviationPercent: aiMaxDeviationPercent,
-            useTwoPass: aiUseTwoPass,
             cleanWholeDocument: aiCleanWholeDocument
         )
 

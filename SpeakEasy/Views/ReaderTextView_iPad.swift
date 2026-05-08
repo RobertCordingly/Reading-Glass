@@ -12,6 +12,10 @@ struct ReaderTextView: UIViewRepresentable {
     /// UTF-16 range of the chunk the AI cleanup pipeline is currently rewriting.
     /// `nil` when no cleanup is in flight. Drawn as a soft yellow highlight.
     var cleaningRange: NSRange? = nil
+    /// UTF-16 range of the chunk *plus* the surrounding sentences sent to the LLM
+    /// as context. `nil` when no cleanup is in flight or no context is configured.
+    /// Drawn as a more subtle yellow tint underneath `cleaningRange`.
+    var cleaningContextRange: NSRange? = nil
     /// Bumped by the parent every time the user picks a search result; forces a
     /// scroll-into-view even when playback is stopped.
     var scrollVersion: Int = 0
@@ -72,6 +76,9 @@ struct ReaderTextView: UIViewRepresentable {
     }
 
     private static let cleaningHighlightColor: UIColor = UIColor.systemYellow.withAlphaComponent(0.28)
+    /// Subtler tint drawn behind the surrounding context the LLM is also reading.
+    /// Sits underneath the main cleaning highlight so the chunk reads as more saturated.
+    private static let cleaningContextHighlightColor: UIColor = UIColor.systemYellow.withAlphaComponent(0.10)
 
     private func buildAttributedString() -> NSAttributedString {
         let paragraphStyle = NSMutableParagraphStyle()
@@ -106,17 +113,24 @@ struct ReaderTextView: UIViewRepresentable {
         storage.endEditing()
     }
 
-    private func clampedCleaningRange() -> NSRange? {
-        guard let range = cleaningRange, range.length > 0 else { return nil }
+    private func clamped(_ range: NSRange?) -> NSRange? {
+        guard let range, range.length > 0 else { return nil }
         let total = (text as NSString).length
         guard range.location < total else { return nil }
         let length = min(range.length, total - range.location)
         return NSRange(location: range.location, length: length)
     }
 
+    /// Apply the context tint first (covers a wider range), then the chunk
+    /// highlight on top — the chunk's stronger color overrides the context tint
+    /// inside the chunk's own range, producing a two-tone band on screen.
     private func applyCleaningHighlight(to storage: NSMutableAttributedString) {
-        guard let range = clampedCleaningRange() else { return }
-        storage.addAttribute(.backgroundColor, value: Self.cleaningHighlightColor, range: range)
+        if let contextRange = clamped(cleaningContextRange) {
+            storage.addAttribute(.backgroundColor, value: Self.cleaningContextHighlightColor, range: contextRange)
+        }
+        if let range = clamped(cleaningRange) {
+            storage.addAttribute(.backgroundColor, value: Self.cleaningHighlightColor, range: range)
+        }
     }
 
     private func applySpeechHighlight(to storage: NSMutableAttributedString) {

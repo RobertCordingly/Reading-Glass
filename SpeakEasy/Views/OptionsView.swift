@@ -23,7 +23,6 @@ struct OptionsView: View {
     @AppStorage(CleanupSettings.windowChunksKey) private var aiWindowChunks = CleanupSettings.defaultWindowChunks
     @AppStorage(CleanupSettings.contextSentencesKey) private var aiContextSentences = CleanupSettings.defaultContextSentences
     @AppStorage(CleanupSettings.maxDeviationPercentKey) private var aiMaxDeviationPercent = CleanupSettings.defaultMaxDeviationPercent
-    @AppStorage(CleanupSettings.useTwoPassKey) private var aiUseTwoPass = CleanupSettings.defaultUseTwoPass
     @AppStorage(CleanupSettings.cleanWholeDocumentKey) private var aiCleanWholeDocument = CleanupSettings.defaultCleanWholeDocument
 
     @State private var availableModels: [String] = []
@@ -369,17 +368,6 @@ struct OptionsView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Toggle(isOn: $aiUseTwoPass) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Two-pass cleanup")
-                        .font(.system(size: 13))
-                    Text("Run a typo-fix pass before the content cleanup pass. Doubles the number of LLM calls. Disable for faster runs with capable models.")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
             }
         }
         .padding(10)

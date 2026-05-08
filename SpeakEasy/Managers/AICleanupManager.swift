@@ -63,14 +63,12 @@ enum CleanupSettings {
     static let windowChunksKey = "cleanupWindowChunks"
     static let contextSentencesKey = "cleanupContextSentences"
     static let maxDeviationPercentKey = "cleanupMaxDeviationPercent"
-    static let useTwoPassKey = "cleanupUseTwoPass"
     static let cleanWholeDocumentKey = "cleanupWholeDocument"
 
     static let defaultSentencesPerChunk = 4
     static let defaultWindowChunks = 3
     static let defaultContextSentences = 2
     static let defaultMaxDeviationPercent = 50.0
-    static let defaultUseTwoPass = true
     static let defaultCleanWholeDocument = false
 
     static let sentencesPerChunkRange = 1...20
@@ -87,7 +85,6 @@ struct AICleanupConfig {
     var windowChunks: Int = CleanupSettings.defaultWindowChunks
     var contextSentences: Int = CleanupSettings.defaultContextSentences
     var maxDeviationPercent: Double = CleanupSettings.defaultMaxDeviationPercent
-    var useTwoPass: Bool = CleanupSettings.defaultUseTwoPass
     var cleanWholeDocument: Bool = CleanupSettings.defaultCleanWholeDocument
 }
 
@@ -101,37 +98,53 @@ protocol LLMBackend: Sendable {
     /// Sends a single non-streaming request and returns the full response text.
     func respond(instructions: String, userMessage: String) async throws -> String
 
-    /// Sends a request along with an optional read-only context block. The default
-    /// implementation embeds the context inline using XML-style markers; backends are
-    /// free to override with a more structured representation (e.g. a separate user
-    /// message in OpenAI chat format).
-    func respond(instructions: String, context: String?, userMessage: String) async throws -> String
+    /// Sends a request along with optional read-only context blocks framing the
+    /// text to clean. The default implementation embeds the context inline using
+    /// XML-style markers; backends are free to override with a more structured
+    /// representation (e.g. separate user messages in OpenAI chat format).
+    func respond(
+        instructions: String,
+        priorContext: String?,
+        followingContext: String?,
+        userMessage: String
+    ) async throws -> String
 }
 
 extension LLMBackend {
-    func respond(instructions: String, context: String?, userMessage: String) async throws -> String {
-        guard let context, !context.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+    func respond(
+        instructions: String,
+        priorContext: String?,
+        followingContext: String?,
+        userMessage: String
+    ) async throws -> String {
+        let prior = priorContext?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let following = followingContext?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasPrior = !(prior?.isEmpty ?? true)
+        let hasFollowing = !(following?.isEmpty ?? true)
+
+        guard hasPrior || hasFollowing else {
             return try await respond(instructions: instructions, userMessage: userMessage)
         }
 
         let augmentedInstructions = """
             \(instructions.trimmingCharacters(in: .whitespacesAndNewlines))
 
-            The user message contains two XML-tagged sections:
-              <PRIOR_CONTEXT>…</PRIOR_CONTEXT> is provided ONLY as context. Do NOT include any of it in your response.
+            The user message contains XML-tagged sections:
+              <PRIOR_CONTEXT>…</PRIOR_CONTEXT> is the text immediately before the target. Reference only.
+              <FOLLOWING_CONTEXT>…</FOLLOWING_CONTEXT> is the text immediately after the target. Reference only.
               <CLEAN_THIS>…</CLEAN_THIS> is the only text you should clean and return.
+            Do NOT include any text from the context sections in your reply.
             Return only the cleaned contents of <CLEAN_THIS>, with no XML tags, no preamble, and no extra commentary.
             """
 
-        let augmentedUser = """
-            <PRIOR_CONTEXT>
-            \(context)
-            </PRIOR_CONTEXT>
-
-            <CLEAN_THIS>
-            \(userMessage)
-            </CLEAN_THIS>
-            """
+        var augmentedUser = ""
+        if let prior, hasPrior {
+            augmentedUser += "<PRIOR_CONTEXT>\n\(prior)\n</PRIOR_CONTEXT>\n\n"
+        }
+        augmentedUser += "<CLEAN_THIS>\n\(userMessage)\n</CLEAN_THIS>"
+        if let following, hasFollowing {
+            augmentedUser += "\n\n<FOLLOWING_CONTEXT>\n\(following)\n</FOLLOWING_CONTEXT>"
+        }
 
         return try await respond(instructions: augmentedInstructions, userMessage: augmentedUser)
     }
@@ -256,27 +269,44 @@ struct LMStudioBackend: LLMBackend {
         ])
     }
 
-    /// Override to send the context as its own user message — gives well‑instructed
-    /// chat models a cleaner separation than inline XML markers.
-    func respond(instructions: String, context: String?, userMessage: String) async throws -> String {
-        guard let context, !context.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+    /// Override to send each context block as its own user message — gives
+    /// well‑instructed chat models a cleaner separation than inline XML markers.
+    func respond(
+        instructions: String,
+        priorContext: String?,
+        followingContext: String?,
+        userMessage: String
+    ) async throws -> String {
+        let prior = priorContext?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let following = followingContext?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasPrior = !(prior?.isEmpty ?? true)
+        let hasFollowing = !(following?.isEmpty ?? true)
+
+        guard hasPrior || hasFollowing else {
             return try await respond(instructions: instructions, userMessage: userMessage)
         }
 
         let system = """
             \(systemPrompt(from: instructions))
 
-            You will receive two user messages: the first is PRIOR CONTEXT for reference only \
-            (do NOT include any of it in your output); the second is the TEXT TO CLEAN. \
-            Reply only with the cleaned version of the TEXT TO CLEAN, with no preamble.
+            You will receive context messages (PRIOR CONTEXT and/or FOLLOWING CONTEXT) for \
+            reference only — do NOT include any of their content in your output. The final \
+            user message is the TEXT TO CLEAN. Reply only with the cleaned version of the \
+            TEXT TO CLEAN, with no preamble.
             """
 
-        return try await respondInternal(messages: [
-            ["role": "system", "content": system],
-            ["role": "user", "content": "PRIOR CONTEXT (do not reproduce):\n\(context)"],
-            ["role": "assistant", "content": "Understood. Send the text to clean."],
-            ["role": "user", "content": "TEXT TO CLEAN:\n\(userMessage)"]
-        ])
+        var messages: [[String: String]] = [["role": "system", "content": system]]
+        if let prior, hasPrior {
+            messages.append(["role": "user", "content": "PRIOR CONTEXT (do not reproduce):\n\(prior)"])
+            messages.append(["role": "assistant", "content": "Understood."])
+        }
+        if let following, hasFollowing {
+            messages.append(["role": "user", "content": "FOLLOWING CONTEXT (do not reproduce):\n\(following)"])
+            messages.append(["role": "assistant", "content": "Understood. Send the text to clean."])
+        }
+        messages.append(["role": "user", "content": "TEXT TO CLEAN:\n\(userMessage)"])
+
+        return try await respondInternal(messages: messages)
     }
 
     private func systemPrompt(from instructions: String) -> String {
@@ -367,18 +397,20 @@ final class AICleanupManager: ObservableObject {
     /// this to draw a soft highlight so the user can see what cleanup is touching.
     @Published var cleaningRangeInDisplay: NSRange? = nil
 
-    private var cleanupTask: Task<Void, Never>?
+    /// UTF-16 range, in `displayText` coordinates, covering the chunk currently in
+    /// flight *plus* the surrounding context sentences sent to the LLM. The reader
+    /// view draws this with a more subtle yellow so the user can see how much
+    /// surrounding text the model is reading for context.
+    @Published var cleaningContextRangeInDisplay: NSRange? = nil
 
-    private let typoFixPrompt = """
-        Fix any spelling errors, typos, or garbage/unreadable characters in this text. \
-        Do not remove any content. Return the corrected text exactly as-is otherwise.
-        """
+    private var cleanupTask: Task<Void, Never>?
 
     /// Clears all AI cleanup state.
     func clear() {
         aiCleanedChunks = [:]
         cleanupLog = []
         cleaningRangeInDisplay = nil
+        cleaningContextRangeInDisplay = nil
     }
 
     /// Reverts a single cleanup log entry (removes its chunk override and log entry).
@@ -414,9 +446,8 @@ final class AICleanupManager: ObservableObject {
     /// Runs chunk-based AI cleanup. Sentences are grouped into chunks of
     /// `config.sentencesPerChunk`. By default cleanup walks a window of
     /// ±`config.windowChunks` chunks around the cursor, but `cleanWholeDocument` runs
-    /// the full document. Each chunk goes through one or two passes (typo fix + content
-    /// cleanup) depending on `useTwoPass`, optionally seeded with prior context for
-    /// continuity.
+    /// the full document. Each chunk gets a single LLM call using the user's prompt,
+    /// seeded with the surrounding sentences as read‑only context.
     func startChunkBasedCleanup(
         cleanedText: String,
         parsedSections: [SectionItem],
@@ -479,8 +510,6 @@ final class AICleanupManager: ObservableObject {
         })
 
         let totalChunks = indicesToClean.count
-        let stepsPerChunk = config.useTwoPass ? 2 : 1
-        let totalSteps = totalChunks * stepsPerChunk
 
         cleanupTask = Task { [weak self] in
             guard let self else { return }
@@ -514,37 +543,33 @@ final class AICleanupManager: ObservableObject {
                         chunks: chunks,
                         aiCleanedChunks: self.aiCleanedChunks
                     )
-
-                    // Build context = N sentences immediately preceding this chunk.
-                    let context = Self.buildContext(
-                        for: chunkIdx,
+                    self.cleaningContextRangeInDisplay = Self.contextDisplayRange(
+                        forChunk: chunkIdx,
                         chunks: chunks,
+                        sentencesPerChunk: sentencesPerChunk,
+                        contextSentences: contextSentences,
+                        sentenceCount: sentenceRanges.count,
+                        aiCleanedChunks: self.aiCleanedChunks
+                    )
+
+                    // Build context = N sentences immediately preceding and following this chunk.
+                    let (priorContext, followingContext) = Self.buildSurroundingContext(
+                        for: chunkIdx,
                         sentenceRanges: sentenceRanges,
                         sentencesPerChunk: sentencesPerChunk,
                         contextSentences: contextSentences,
                         in: nsText
                     )
 
-                    let textForCleanup: String
-                    if config.useTwoPass {
-                        let baseStep = step * 2
-                        self.backgroundCleanProgress = Double(baseStep) / Double(totalSteps)
-                        self.backgroundCleanStatus = "Typos \(step + 1)/\(totalChunks)..."
-                        textForCleanup = try await Self.aiCleanSection(
-                            chunkText, prompt: self.typoFixPrompt, context: nil, backend: backend
-                        )
-                        try Task.checkCancellation()
-
-                        self.backgroundCleanProgress = Double(baseStep + 1) / Double(totalSteps)
-                        self.backgroundCleanStatus = "Cleanup \(step + 1)/\(totalChunks)..."
-                    } else {
-                        self.backgroundCleanProgress = Double(step) / Double(totalSteps)
-                        self.backgroundCleanStatus = "Cleanup \(step + 1)/\(totalChunks)..."
-                        textForCleanup = chunkText
-                    }
+                    self.backgroundCleanProgress = Double(step) / Double(totalChunks)
+                    self.backgroundCleanStatus = "Cleanup \(step + 1)/\(totalChunks)..."
 
                     let afterCleanup = try await Self.aiCleanSection(
-                        textForCleanup, prompt: aiCleanupPrompt, context: context, backend: backend
+                        chunkText,
+                        prompt: aiCleanupPrompt,
+                        priorContext: priorContext,
+                        followingContext: followingContext,
+                        backend: backend
                     )
                     try Task.checkCancellation()
 
@@ -558,6 +583,7 @@ final class AICleanupManager: ObservableObject {
                     // is applied the chunk's display range shifts (different length),
                     // so the previously published range would point at stale text.
                     self.cleaningRangeInDisplay = nil
+                    self.cleaningContextRangeInDisplay = nil
 
                     if accept {
                         self.aiCleanedChunks[chunkIdx] = afterCleanup
@@ -580,17 +606,20 @@ final class AICleanupManager: ObservableObject {
                 }
 
                 self.cleaningRangeInDisplay = nil
+                self.cleaningContextRangeInDisplay = nil
                 self.backgroundCleanProgress = 1.0
                 self.backgroundCleanStatus = ""
                 self.isCleaningInBackground = false
                 self.cleanupTask = nil
             } catch is CancellationError {
                 self.cleaningRangeInDisplay = nil
+                self.cleaningContextRangeInDisplay = nil
                 self.backgroundCleanStatus = "Cancelled"
                 self.isCleaningInBackground = false
                 self.cleanupTask = nil
             } catch {
                 self.cleaningRangeInDisplay = nil
+                self.cleaningContextRangeInDisplay = nil
                 self.backgroundCleanStatus = (error as? AICleanupError)?.errorDescription ?? error.localizedDescription
                 self.isCleaningInBackground = false
                 self.cleanupTask = nil
@@ -601,12 +630,18 @@ final class AICleanupManager: ObservableObject {
     private static func aiCleanSection(
         _ text: String,
         prompt: String,
-        context: String?,
+        priorContext: String?,
+        followingContext: String?,
         backend: LLMBackend
     ) async throws -> String {
         guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { return text }
         do {
-            let result = try await backend.respond(instructions: prompt, context: context, userMessage: text)
+            let result = try await backend.respond(
+                instructions: prompt,
+                priorContext: priorContext,
+                followingContext: followingContext,
+                userMessage: text
+            )
             // The backend may swallow a cancellation as a generic error; double-check.
             try Task.checkCancellation()
             return result
@@ -621,33 +656,59 @@ final class AICleanupManager: ObservableObject {
         }
     }
 
-    /// Builds a context string from up to `contextSentences` sentences immediately
-    /// preceding the chunk at `chunkIdx`. Returns nil if no context is requested or
-    /// available.
-    private static func buildContext(
+    /// Builds context strings from up to `contextSentences` sentences immediately
+    /// preceding *and* immediately following the chunk at `chunkIdx`. Either side
+    /// may be nil when no context is requested or available (e.g. at document edges).
+    private static func buildSurroundingContext(
         for chunkIdx: Int,
-        chunks: [(start: Int, end: Int)],
         sentenceRanges: [(start: Int, end: Int)],
         sentencesPerChunk: Int,
         contextSentences: Int,
         in nsText: NSString
-    ) -> String? {
-        guard contextSentences > 0 else { return nil }
+    ) -> (prior: String?, following: String?) {
+        guard contextSentences > 0 else { return (nil, nil) }
         // Chunks are formed by uniformly grouping `sentencesPerChunk` sentences,
         // starting at sentence 0. So the first sentence of chunk N is at index
         // N * sentencesPerChunk.
         let firstSentenceIdx = chunkIdx * sentencesPerChunk
-        guard firstSentenceIdx > 0, firstSentenceIdx <= sentenceRanges.count else { return nil }
-        let ctxStart = max(0, firstSentenceIdx - contextSentences)
-        let ctxEnd = firstSentenceIdx
-        guard ctxEnd > ctxStart else { return nil }
+        let lastSentenceIdx = min(sentenceRanges.count - 1, firstSentenceIdx + sentencesPerChunk - 1)
 
-        let startUTF16 = sentenceRanges[ctxStart].start
-        let endUTF16 = sentenceRanges[ctxEnd - 1].end
+        let prior = substring(
+            sentenceRanges: sentenceRanges,
+            startSentence: max(0, firstSentenceIdx - contextSentences),
+            endSentenceExclusive: firstSentenceIdx,
+            in: nsText
+        )
+
+        let followingStart = lastSentenceIdx + 1
+        let following = substring(
+            sentenceRanges: sentenceRanges,
+            startSentence: followingStart,
+            endSentenceExclusive: min(sentenceRanges.count, followingStart + contextSentences),
+            in: nsText
+        )
+
+        return (prior, following)
+    }
+
+    /// Substring helper: joins the text spanned by `[startSentence, endSentenceExclusive)`
+    /// into a single trimmed string, or nil if the range is empty.
+    private static func substring(
+        sentenceRanges: [(start: Int, end: Int)],
+        startSentence: Int,
+        endSentenceExclusive: Int,
+        in nsText: NSString
+    ) -> String? {
+        guard startSentence < endSentenceExclusive,
+              startSentence >= 0,
+              endSentenceExclusive <= sentenceRanges.count else { return nil }
+        let startUTF16 = sentenceRanges[startSentence].start
+        let endUTF16 = sentenceRanges[endSentenceExclusive - 1].end
         let length = endUTF16 - startUTF16
         guard length > 0, startUTF16 + length <= nsText.length else { return nil }
-        return nsText.substring(with: NSRange(location: startUTF16, length: length))
+        let s = nsText.substring(with: NSRange(location: startUTF16, length: length))
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        return s.isEmpty ? nil : s
     }
 
     // MARK: - Static helpers
@@ -752,6 +813,46 @@ final class AICleanupManager: ObservableObject {
             length = chunks[chunkIdx].end - chunks[chunkIdx].start
         }
         return NSRange(location: pos, length: length)
+    }
+
+    /// Returns the UTF-16 range, in `displayText` coordinates, covering the chunk
+    /// at `chunkIdx` *plus* the adjacent chunks that hold its surrounding context
+    /// sentences. The reader view draws this with a subtler highlight to show how
+    /// much surrounding text the LLM is reading for context. Falls back to the
+    /// chunk-only range when no context is configured.
+    static func contextDisplayRange(
+        forChunk chunkIdx: Int,
+        chunks: [(start: Int, end: Int)],
+        sentencesPerChunk: Int,
+        contextSentences: Int,
+        sentenceCount: Int,
+        aiCleanedChunks: [Int: String]
+    ) -> NSRange {
+        guard !chunks.isEmpty, chunkIdx >= 0, chunkIdx < chunks.count else {
+            return NSRange(location: 0, length: 0)
+        }
+        guard contextSentences > 0, sentencesPerChunk > 0, sentenceCount > 0 else {
+            return displayRange(forChunk: chunkIdx, chunks: chunks, aiCleanedChunks: aiCleanedChunks)
+        }
+
+        let firstSentenceIdx = chunkIdx * sentencesPerChunk
+        let lastSentenceIdx = min(sentenceCount - 1, firstSentenceIdx + sentencesPerChunk - 1)
+        let priorStartSentence = max(0, firstSentenceIdx - contextSentences)
+        let followingEndSentence = min(sentenceCount - 1, lastSentenceIdx + contextSentences)
+
+        let leftChunk = max(0, min(chunks.count - 1, priorStartSentence / sentencesPerChunk))
+        let rightChunk = max(0, min(chunks.count - 1, followingEndSentence / sentencesPerChunk))
+
+        var pos = 0
+        var startPos = 0
+        var endPos = 0
+        for i in 0..<chunks.count {
+            let len = (aiCleanedChunks[i].map { ($0 as NSString).length }) ?? (chunks[i].end - chunks[i].start)
+            if i == leftChunk { startPos = pos }
+            pos += len
+            if i == rightChunk { endPos = pos; break }
+        }
+        return NSRange(location: startPos, length: max(0, endPos - startPos))
     }
 
     /// Builds display text from cleanedText and AI-cleaned chunk overrides. Returns (displayText, sectionOffsets).
