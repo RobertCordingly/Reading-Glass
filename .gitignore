@@ -32,3 +32,12 @@ Thumbs.db
 *~
 .idea/
 *.xcuserstate
+
+# Android / Gradle
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.cxx/
+android/captures/
+*.iml

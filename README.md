@@ -1,10 +1,12 @@
 # Reading Glass
 
-**A native macOS and iPadOS app that reads academic PDFs aloud — and uses a local LLM to make them actually pleasant to listen to.**
+**A native macOS, iPadOS, and Android app that reads academic PDFs aloud — and (on Apple platforms) uses a local LLM to make them actually pleasant to listen to.**
 
-Reading Glass loads a PDF, extracts and tidies up the prose, and plays it back through a system text‑to‑speech voice while highlighting the current word in both the reader pane and the PDF itself. Optional AI cleanup runs through a **local language model** (LM Studio by default, Apple Intelligence as a fallback) to strip out figures, tables, captions, page headers, and OCR garbage that would otherwise turn a paper into an unlistenable slog.
+Reading Glass loads a PDF, extracts and tidies up the prose, and plays it back through a system text‑to‑speech voice while highlighting the current word in both the reader pane and the PDF itself. On macOS/iPadOS, optional AI cleanup runs through a **local language model** (LM Studio by default, Apple Intelligence as a fallback) to strip out figures, tables, captions, page headers, and OCR garbage that would otherwise turn a paper into an unlistenable slog.
 
-The app is intentionally local‑first. Your PDFs and your text never leave your machine.
+The app is intentionally local‑first. Your PDFs and your text never leave your device.
+
+> The Android version ships the same PDF reader, TTS playback, text cleanup, pronunciations, sections, and search as the Apple build. The **AI Cleanup / Summary** features are macOS/iPadOS only.
 
 ---
 
@@ -80,6 +82,8 @@ If your Mac or iPad supports Apple Intelligence and you'd rather not run a separ
 
 ## Building from source
 
+### macOS / iPadOS
+
 **Requirements**
 - Xcode 16 or newer
 - macOS 26 or iPadOS 26 (the `FoundationModels` framework requires the modern SDK; it's only loaded when the Apple Intelligence backend is selected)
@@ -98,12 +102,38 @@ Build and run the **SpeakEasy** scheme on either *My Mac* or an iPad simulator/d
 
 The project is currently configured **without** the App Sandbox (`CODE_SIGN_ENTITLEMENTS = ""`), so connecting to `http://localhost:1234` works out of the box. If you later enable sandboxing, add `com.apple.security.network.client` to your entitlements so the LM Studio backend can reach the local server.
 
+### Android
+
+**Requirements**
+- Android Studio Koala (2024.1) or newer, or a standalone JDK 17 + Android command-line tools
+- Android SDK with platform 34, build-tools 34.0.0+
+- A device or emulator running Android 7.0 (API 24) or newer
+
+**Build**
+```bash
+cd android
+# First-time only — generate the Gradle wrapper.
+gradle wrapper
+./gradlew :app:installDebug
+```
+
+Or open `android/` as a project in Android Studio and run the **app** configuration.
+
+**What's included**
+- PDF rendering via Android's built-in `PdfRenderer`
+- Text extraction via [PDFBox-Android](https://github.com/TomRoush/PdfBox-Android)
+- TTS via `android.speech.tts.TextToSpeech` (no extra setup; works offline with installed system voices)
+- Section parsing, search, pronunciations, and the same `TextProcessor` pipeline as the Apple build (Greek letters, math symbols, ligatures, citations, etc.)
+
+**What's *not* included on Android**
+- AI Cleanup and AI Summary. The Android build is TTS-only. If you want LLM-driven cleanup, use the macOS / iPadOS build with LM Studio or Apple Intelligence.
+
 ---
 
 ## Project layout
 
 ```
-SpeakEasy/
+SpeakEasy/                macOS / iPadOS app (Swift + SwiftUI)
 ├── App/                  SpeakEasyApp.swift — app entry point, commands
 ├── Views/                SwiftUI views (ContentView, OptionsView, …)
 ├── Models/               Lightweight value types
@@ -114,9 +144,24 @@ SpeakEasy/
 ├── Processing/           PDF import, text normalization
 ├── Resources/            Assets.xcassets
 └── PlatformAdapters.swift  macOS / iOS color & clipboard shims
+
+android/                  Android app (Kotlin + Jetpack Compose)
+├── app/src/main/kotlin/com/readingglass/
+│   ├── MainActivity.kt            Activity entry point
+│   ├── ReadingGlassApplication.kt PDFBox bootstrap
+│   ├── models/Models.kt           Value types (SectionItem, SearchResult, …)
+│   ├── processing/
+│   │   ├── TextProcessor.kt       Port of the Swift TextProcessor
+│   │   ├── SectionParser.kt       Port of SectionParser
+│   │   ├── PdfImporter.kt         PDFBox-Android text extraction
+│   │   └── PdfRendering.kt        PdfRenderer-based page bitmaps
+│   ├── managers/SpeechManager.kt  android.speech.tts driver, cursor tracking
+│   ├── store/Preferences.kt       SharedPreferences-backed settings
+│   └── ui/                        Compose screens (PdfViewer, ReaderText, …)
+└── app/src/main/res/              Manifest, themes, icons
 ```
 
-The AI provider layer (`LLMBackend`, `AppleIntelligenceBackend`, `LMStudioBackend`, `LLMSettings`) lives in `Managers/AICleanupManager.swift` and is the single entry point for adding more local backends in the future (e.g. Ollama, llama.cpp, MLX).
+The AI provider layer (`LLMBackend`, `AppleIntelligenceBackend`, `LMStudioBackend`, `LLMSettings`) lives in `Managers/AICleanupManager.swift` and is the single entry point for adding more local backends in the future (e.g. Ollama, llama.cpp, MLX). The Android build intentionally omits this layer.
 
 ---
 

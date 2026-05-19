@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Reading Glass</string>
+    <string name="open_pdf">Open PDF</string>
+    <string name="play">Play</string>
+    <string name="pause">Pause</string>
+    <string name="stop">Stop</string>
+    <string name="next_sentence">Next sentence</string>
+    <string name="previous_sentence">Previous sentence</string>
+    <string name="options">Options</string>
+    <string name="sections">Sections</string>
+    <string name="search">Search</string>
+    <string name="reader">Reader</string>
+    <string name="pronunciations">Pronunciations</string>
+</resources>
